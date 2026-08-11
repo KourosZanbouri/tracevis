@@ -130,3 +130,13 @@ dmypy.json
 
 tracevis_data/
 .coverage
+
+# Local measurement output and working notes. Runs write real capture data,
+# so output directories and the notes written against them stay out of the
+# repository; only the tool and its tests belong here.
+tracevis_data*/
+docs/review/
+verify/
+newtes/
+new-res/
+*.zip

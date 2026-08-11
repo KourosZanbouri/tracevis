@@ -1,40 +1,77 @@
 name: Dockerise
 
 on:
+  pull_request:
+  push:
   release:
     types: [published]
+  workflow_dispatch:
 
 env:
   IMAGE_NAME: ${{ github.repository }}
   REGISTRY: ghcr.io
 
 jobs:
+  # Build (no push) on every push/PR. A broken Dockerfile previously reached
+  # main because the image was only ever built on `release: published`.
+  build-image:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: tracevis:ci
+      # Smoke test: the entrypoint must run under the *default* capability set.
+      # `setcap`-ing the interpreter inside the image makes every exec fail with
+      # EPERM here, which is exactly what this step exists to catch.
+      - name: Smoke test entrypoint
+        run: docker run --rm tracevis:ci -h
+      - name: Run unit tests inside the image
+        run: docker run --rm --entrypoint python tracevis:ci -m unittest discover test
+
   push-image:
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
+      # Checkout
       - name: Checkout repository
-        uses: actions/checkout@v2
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v1
+        uses: actions/checkout@v7
+      # Login to the GitHub Container Registry (ghcr.io)
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Tag the image with metadata for Docker
       - name: Tag image
         id: meta
-        uses: docker/metadata-action@v3
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: |
             latest=true
-          tags: | 
-            {{tag}}
+          tags: |
+            type=sha,format=short
+            type=ref,event=tag
+      # Build and push by reaching the Docker container to GitHub Container Registry
       - name: Build and push
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

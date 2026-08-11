@@ -3,7 +3,9 @@ import base64
 import json
 import subprocess
 
-from scapy.all import IP, TCP, Ether, hexdump, import_hexcap
+from scapy.all import IP, TCP, UDP, Ether, hexdump, import_hexcap
+
+import utils.anonymize
 
 FIREWALL_COMMANDS_HELP = "\r\n( · - · · · \r\n\
 You may need to temporarily block RST output packets in your firewall.\r\n\
@@ -31,16 +33,45 @@ class InputPacketInfo:
         self._do_tcph2 = do_tcph2
         self._add_firewall_rule = add_firewall_rule
 
+    @staticmethod
+    def _dump(packet):
+        """Hexdump a packet with the operator's source address removed.
+
+        This is the seam every dumped config passes through, and it is how LAN
+        addresses reached `samples/`: nine committed samples carry a real
+        `192.168.*` source because the JSON input path never applied the
+        sentinel that `_read_pasted_packet` applies. Scrubbing here covers every
+        input path at once.
+
+        Behaviour-neutral — `Tracer.send_packet` overwrites `IP.src` on every
+        probe, so the stored source is never what goes on the wire. The rebuild
+        is what keeps the header checksum consistent with the new address.
+        """
+        copied = packet.copy()
+        if copied.haslayer(IP):
+            copied[IP].src = utils.anonymize.SENTINEL_SOURCE
+            # Both layers: the TCP/UDP checksum covers an IP pseudo-header, so
+            # the new source invalidates it as well. A header that does not
+            # verify against its own address is a sharper fingerprint than the
+            # address was — `samples/quicvd29.conf` shipped one for exactly this
+            # reason before backlog §2.8.
+            for layer in (IP, TCP, UDP):
+                if copied.haslayer(layer):
+                    del copied[layer].chksum
+            copied = IP(bytes(copied))
+        return 'b64:' + base64.b64encode(
+            hexdump(copied, True).encode()).decode()
+
     def as_dict(self):
         res = {
             "packet1": {
-                'hex': 'b64:' + base64.b64encode(hexdump(self._packet1, True).encode()).decode(),
+                'hex': self._dump(self._packet1),
                 'handshake': self._do_tcph1,
             },
         }
         if self._packet2:
             res['packet2'] = {
-                'hex': 'b64:' + base64.b64encode(hexdump(self._packet2, True).encode()).decode(),
+                'hex': self._dump(self._packet2),
                 'handshake': self._do_tcph2,
             }
         res["add_firewall_drop"] = self._add_firewall_rule
@@ -181,7 +212,7 @@ class InputPacketInfo:
         print(" . . . - .     . . . - .     . . . - .     . . . - . ")
         print(" . . . - . developed view of first packet:")
         if not cls._supported_or_correct(packet):
-            BADPacketException(
+            raise BADPacketException(
                 f"{k} it's not IPv4 or the hexdump is not started with IP layer")
         if show:
             packet.show()
@@ -219,22 +250,49 @@ class InputPacketInfo:
             raise BADPacketException("File Not Found")
         return InputPacketInfo(copy_packet_1, copy_packet_2, do_tcph1,  do_tcph2, add_firewall_rule)
 
+    @staticmethod
+    def _interactive_namespace():
+        """The names available at the interactive prompt.
+
+        Everything scapy exports, so `IP(dst="1.1.1.1")/TCP()` works as typed.
+        The namespace used to be this method's `locals()`, which held `cls`,
+        `show` and the scapy *module* — so building a packet actually meant
+        `scapy.all.IP(...)`, which is not what the banner asks for.
+        """
+        import scapy.all
+        return dict(vars(scapy.all))
+
     @classmethod
     def _read_interactive_packet(cls, show=False):
-        import scapy.all
         banner = "Please create your packet in variable \"p\" and exit when you are done"
+        namespace = cls._interactive_namespace()
         try:
             from IPython.terminal.embed import InteractiveShellEmbed
-            ipshell = InteractiveShellEmbed(banner1=banner, user_ns=locals())
-            ipshell()
-            packet = ipshell.user_ns['p']
-        except:
-            # FIXME: Make this work with default console
-            raise NotImplementedError(
-                "Currently Only IPython Console is supported!")
+        except ImportError:
+            # IPython is a convenience, not a requirement (backlog §2.9): it is
+            # not in requirements.txt and may well be absent in the restricted
+            # environments this tool is aimed at. The stdlib console builds the
+            # same packet. This fallback existed but sat *after* an
+            # unconditional `raise`, so it was unreachable and anyone without
+            # IPython was told "Currently Only IPython Console is supported!".
+            print(" . . . - . IPython not found, using the built-in console."
+                  " Press Ctrl-D when you are done.")
             import code
-            code.interact(banner=banner, local=locals())
-            packet = p
+            code.interact(banner=banner, local=namespace)
+        else:
+            ipshell = InteractiveShellEmbed(banner1=banner, user_ns=namespace)
+            ipshell()
+            namespace = ipshell.user_ns
+        # Leaving without assigning `p` used to surface as a bare `KeyError`
+        # swallowed by the `except:` above and reported as IPython's absence.
+        if "p" not in namespace:
+            raise BADPacketException(
+                "no packet found: assign the packet you built to `p` before"
+                " leaving the console")
+        packet = namespace["p"]
+        if not hasattr(packet, "haslayer"):
+            raise BADPacketException(
+                f"`p` is a {type(packet).__name__}, not a scapy packet")
         if not cls._supported_or_correct(packet):
             raise BADPacketException(
                 "it's not IPv4 or the hexdump is not started with IP layer")

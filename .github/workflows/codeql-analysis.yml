@@ -11,14 +11,15 @@
 #
 name: "CodeQL"
 
+# CodeQL analysis of private repositories requires "code scanning" to be
+# enabled in the repository Settings (Code security and analysis -> Code
+# scanning) and, for private repos, GitHub Advanced Security. The push/PR
+# triggers below are therefore DISABLED by default on private forks so CI
+# does not hard-fail on every push ("Code scanning is not enabled ...").
+# Re-enable when the repo has code scanning + GHAS: add back the `push`/`pull_request`
+# triggers and keep `workflow_dispatch` to run on demand.
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    # The branches below must be a subset of the branches above
-    branches: [ main ]
-  schedule:
-    - cron: '42 13 * * 1'
+  workflow_dispatch:
 
 jobs:
   analyze:
@@ -38,11 +39,11 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v7
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
+      uses: github/codeql-action/init@v4
       with:
         languages: ${{ matrix.language }}
         # If you wish to specify custom queries, you can do so here or in a config file.
@@ -53,7 +54,7 @@ jobs:
     # Autobuild attempts to build any compiled languages  (C/C++, C#, or Java).
     # If this step fails, then you should remove it and run the build manually (see below)
     - name: Autobuild
-      uses: github/codeql-action/autobuild@v2
+      uses: github/codeql-action/autobuild@v4
 
     # ℹ️ Command-line programs to run using the OS shell.
     # 📚 https://git.io/JvXDl
@@ -67,4 +68,4 @@ jobs:
     #   make release
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v2
+      uses: github/codeql-action/analyze@v4

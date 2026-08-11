@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import html
 import ipaddress
 import json
 import os
@@ -8,6 +9,9 @@ import networkx as nx
 import pyvis._version
 from pyvis.network import Network
 
+import utils.convert_packetlist
+import utils.dpi
+
 ROUTER_COLOR = "green"
 WINDOWS_COLOR = "blue"
 LINUX_COLOR = "purple"
@@ -15,6 +19,14 @@ MIDDLEBOX_COLOR = "red"
 PEP_COLOR = "green"
 NAT_COLOR = "dodgerblue"
 NO_RESPONSE_COLOR = "gray"
+
+# M4: a hop that SNI-inspected a TCP/443 flow (DPI extraction).
+DPI_COLOR = "orange"
+DPI_NAME = "SNI-inspected"
+# Backlog §2.12: the node the graph draws at the destination is not the
+# destination — something on the path answered in its name.
+FORGED_COLOR = "crimson"
+FORGED_NAME = "Forged reply (impersonating the destination)"
 
 ROUTER_NAME = "Router"
 WINDOWS_NAME = "Windows"
@@ -189,7 +201,10 @@ def visualize(previous_node_id, current_node_id,
                                   color=requset_color, title=current_edge_title)
 
 
-def tooltips_append_lines(is_nat, is_middlebox, is_pep, packet_type, tcpflag):
+def tooltips_append_lines(is_nat, is_middlebox, is_pep, packet_type, tcpflag,
+                          dpi_cleared=False, cgnat_hop=False, sni_inspected=False,
+                          rst_flood=False, tcp_silently_dropped=False,
+                          forgery_evidence=""):
     append_line = ''
     if packet_type == "TCP":
         append_line = "<br/>response TCP flag: " + tcpflag
@@ -197,7 +212,14 @@ def tooltips_append_lines(is_nat, is_middlebox, is_pep, packet_type, tcpflag):
             + "<br/>Middlebox: " + str(is_middlebox)
             + "<br/>PEP: " + str(is_pep)
             + "<br/>response packet: " + packet_type
-            + append_line)
+            + append_line
+            + "<br/>DPI cleared: " + str(dpi_cleared)
+            + "<br/>CGNAT hop: " + str(cgnat_hop)
+            + "<br/>SNI inspected: " + str(sni_inspected)
+            + "<br/>RST flood: " + str(rst_flood)
+            + "<br/>TCP silently dropped: " + str(tcp_silently_dropped)
+            + ("<br/>REPLY FORGED: " + html.escape(forgery_evidence)
+               if forgery_evidence else ""))
 
 
 def styled_tooltips(
@@ -261,11 +283,21 @@ def save_measurement_graph(graph_name, attach_jscss):
     if graph_name.endswith(".json"):
         graph_name = graph_name[:-5]
     graph_path = graph_name + ".html"
-    net_vis.save_graph(graph_path)
+    # pyvis's save_graph() uses the OS default encoding (cp1252 on Windows),
+    # which fails with UnicodeEncodeError on Unicode chars in tooltips/payloads.
+    # Bypass by writing the HTML ourselves with explicit UTF-8 encoding.
+    html_content = net_vis.generate_html()
+    with open(graph_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
     print("saved: " + graph_path)
 
 
 def vis(measurement_path, attach_jscss, edge_lable: str = "none"):
+    # The graph is module-level, and nothing used to clear it: a second call in
+    # the same process rendered the first measurement's nodes into the second
+    # file. The CLI renders once per run so it never surfaced there, but it made
+    # `vis()` wrong as a function and impossible to test in isolation.
+    multi_directed_graph.clear()
     all_measurements = []
     was_successful = False
     with open(measurement_path) as json_file:
@@ -314,11 +346,19 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none"):
                     device_name = NO_RESPONSE_NAME
                     append_lines = ""
                     is_middlebox = False
+                    is_forged_reply = False
                     if 'x' in result.keys():
                         current_node_id = (
                             "unknown" + previous_node_ids[repeat_steps] + "x")
                         if edge_lable != "none":
                             current_edge_label = "*"
+                        # A star hop can still carry a reason — a TCP handshake
+                        # refused by an injected RST or an ICMP prohibited sends
+                        # no data packet, so there is no answer to draw, but
+                        # "nothing came back" and "a box said no" are different
+                        # findings and the graph should not show them alike.
+                        if result.get("note"):
+                            append_lines += "<br/>" + html.escape(result["note"])
                     else:
                         answer_ip = result["from"]
                         backttl, device_color, device_name, is_middlebox_ttl = parse_ttl(
@@ -338,6 +378,51 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none"):
                                     is_nat, is_middlebox, is_pep, packet_type, tcpflag = detect_nat_pep_middlebox(
                                         result['packets']['sent'], result['packets']['received']
                                     )
+                                    # M4 per-hop
+                                    # DPI/CGNAT/SNI posture. Combine the
+                                    # path-level struct fields (set in trace.py)
+                                    # with the per-hop NAT/PEP/middlebox evidence
+                                    # and the probe's L4 proto/port.
+                                    path_cgnat = bool(measurement.get("cgnat_hop", False))
+                                    path_cleared = bool(measurement.get("dpi_cleared", False))
+                                    path_sni = bool(measurement.get("sni_inspected", False))
+                                    path_rst_flood = bool(measurement.get("rst_flood", False))
+                                    path_tcp_drop = bool(measurement.get("tcp_silently_dropped", False))
+                                    reply_forged = bool(measurement.get("reply_forged", False))
+                                    forgery_evidence = measurement.get("forgery_evidence", "")
+                                    probe_proto = measurement.get("proto", "")
+                                    # Prefer the port this hop actually probed:
+                                    # with RST backoff the path-level `port` is
+                                    # only where the trace started, and the
+                                    # sni_inspected gate gates on dport == 443.
+                                    hop_dport = result.get("dport")
+                                    probe_dport = int(
+                                        hop_dport if hop_dport is not None
+                                        else (measurement.get("port", -1) or -1))
+                                    rst_count = result.get("rst_count", 0)
+                                    # Measurements written before the struct
+                                    # carried `network_state` are read the old
+                                    # way — back then `cgnat_hop` was true only
+                                    # in an allowlisted regime, so the inference
+                                    # held. It no longer does for new files.
+                                    path_state = measurement.get("network_state") or (
+                                        "allowlisted" if path_cgnat else "open")
+                                    _hop = utils.dpi.classify_dpi_path(
+                                        is_nat=is_nat,
+                                        is_middlebox=is_middlebox or is_middlebox_ttl,
+                                        is_pep=is_pep,
+                                        network_state=path_state,
+                                        sent_proto=probe_proto,
+                                        sent_dport=probe_dport,
+                                        rst_count=rst_count,
+                                        cgnat_observed=utils.dpi.is_cgnat_address(
+                                            answer_ip),
+                                    )
+                                    dpi_cleared = path_cleared or (_hop.dpi_cleared and not path_sni)
+                                    cgnat_hop = path_cgnat or _hop.cgnat_hop
+                                    sni_inspected = path_sni or _hop.sni_inspected
+                                    rst_flood = path_rst_flood or _hop.rst_flood
+                                    tcp_silently_dropped = path_tcp_drop or _hop.tcp_silently_dropped
                                     if (is_middlebox_ttl or is_middlebox
                                             ) and not already_detected[repeat_steps]["is_middlebox"]:
                                         pass  # we decide about it later
@@ -354,24 +439,58 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none"):
                                         already_detected[repeat_steps]["is_nat"] = True
                                         if current_node_id != dst_addr_id:
                                             current_node_id = "nat" + current_node_id + "x"
+                                    elif (sni_inspected
+                                          and not (is_pep or is_nat
+                                                   or is_middlebox_ttl or is_middlebox)
+                                          and not already_detected[repeat_steps]["is_middlebox"]):
+                                        # Path-level SNI inspection on a hop not
+                                        # already tagged PEP/NAT/middlebox.
+                                        device_color = DPI_COLOR
+                                        device_name = DPI_NAME
+                                        current_node_shape = "diamond"
+                                        already_detected[repeat_steps]["is_middlebox"] = True
+                                    # Backlog §2.12: this reply claims to come
+                                    # from the destination and did not. Drawing
+                                    # it as the destination would put the
+                                    # censor's box on the graph wearing the
+                                    # destination's name, which is exactly the
+                                    # confusion the detector exists to remove.
+                                    is_forged_reply = (
+                                        reply_forged and answer_ip == dst_addr)
                                     append_lines = tooltips_append_lines(
-                                        is_nat, is_middlebox, is_pep, packet_type, tcpflag)
+                                        is_nat, is_middlebox, is_pep, packet_type, tcpflag,
+                                        dpi_cleared=dpi_cleared, cgnat_hop=cgnat_hop,
+                                        sni_inspected=sni_inspected, rst_flood=rst_flood,
+                                        tcp_silently_dropped=tcp_silently_dropped,
+                                        forgery_evidence=forgery_evidence)
                                     if (is_middlebox_ttl or is_middlebox):
                                         already_detected[repeat_steps]["is_middlebox"] = True
                                     if is_pep:
                                         already_detected[repeat_steps]["is_pep"] = True
                                     if is_nat:
                                         already_detected[repeat_steps]["is_nat"] = True
-                        if is_middlebox_ttl or is_middlebox:
-                            current_node_id = "middlebox" + current_node_id + "x"
-                            current_node_shape = "star"
-                            device_color = MIDDLEBOX_COLOR
-                            device_name = MIDDLEBOX_NAME
-                            already_detected[repeat_steps]["is_middlebox"] = True
-                        elif current_node_id == dst_addr_id:
-                            current_node_shape = "square"
-                        current_node_label = answer_ip
-                        packet_size = result["size"]
+                                if is_forged_reply:
+                                    # Takes precedence over the generic middlebox
+                                    # marking below, which `parse_ttl` already
+                                    # raises for any reply under TTL 20 — true
+                                    # here, but it says "some box" where this
+                                    # says "a box answering in the destination's
+                                    # name", and carries the evidence for it.
+                                    current_node_id = "forged" + current_node_id + "x"
+                                    current_node_shape = "triangleDown"
+                                    device_color = FORGED_COLOR
+                                    device_name = FORGED_NAME
+                                    already_detected[repeat_steps]["is_middlebox"] = True
+                                elif is_middlebox_ttl or is_middlebox:
+                                    current_node_id = "middlebox" + current_node_id + "x"
+                                    current_node_shape = "star"
+                                    device_color = MIDDLEBOX_COLOR
+                                    device_name = MIDDLEBOX_NAME
+                                    already_detected[repeat_steps]["is_middlebox"] = True
+                                elif current_node_id == dst_addr_id:
+                                    current_node_shape = "square"
+                                current_node_label = answer_ip
+                                packet_size = result["size"]
                     repeat_step_str = str(repeat_steps + 1)
                     current_edge_title = styled_tooltips(
                         current_request_color=(

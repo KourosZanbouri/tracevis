@@ -13,7 +13,10 @@ import utils.csv
 import utils.dns
 import utils.iface
 import utils.packet_input
+import utils.portpool
 import utils.ripe_atlas
+import utils.sni
+import utils.timing
 import utils.trace
 import utils.vis
 
@@ -21,8 +24,28 @@ TIMEOUT = 1
 MAX_TTL = 50
 REPEAT_REQUESTS = 3
 DEFAULT_OUTPUT_DIR = "./tracevis_data/"
-DEFAULT_REQUEST_IPS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
 OS_NAME = platform.system()
+
+# Probe modes whose *meaning* is their destination port: UDP/53, TCP/53,
+# TCP/853 and the UDP/53 dnstt carrier. Rewriting the port on these does not
+# move the probe somewhere safer, it stops it being a DNS probe at all —
+# nothing answers on UDP/2053, so the run silently measures the reachability of
+# an arbitrary port instead. `--sni-test` and the packet samples are the
+# 443-shaped probes the port pool exists for.
+PORT_BOUND_MODES = ("dns", "dnstcp", "dnsdot", "dnstt")
+
+
+def use_default_targets(default_resolvers):
+    """Fall back to the curated destination pool, and say what it is.
+
+    The pool is not a list of equals: it pairs a field-confirmed reachable
+    control with destinations chosen to fail differently (see `utils/dns.py`).
+    A run that prints three addresses and no roles invites reading the result as
+    "one of three resolvers worked" rather than as the comparison it is.
+    """
+    targets = utils.dns.filter_blackholed(default_resolvers)
+    print("· · · - · default targets: " + utils.dns.describe_targets(targets))
+    return targets
 
 
 def combine_json_files(json_list_files):
@@ -72,11 +95,15 @@ def process_input_args(args, parser):
             args_dict.update(json.load(f))
     for k in passed_args:
         args_dict[k] = cli_args_dict.get(k)
-    if 'dns' in passed_args:
+    _DNS_FAMILY = ('dns', 'dnstcp', 'dnsdot', 'dnstt')
+    if any(flag in passed_args for flag in _DNS_FAMILY):
         args_dict['packet'] = False
         args_dict['packet_input_method'] = None
     if 'packet' in passed_args:
         args_dict['dns'] = False
+        args_dict['dnstcp'] = False
+        args_dict['dnsdot'] = False
+        args_dict['dnstt'] = False
     return args_dict
 
 
@@ -103,6 +130,13 @@ def get_args(sys_args, auto_exit=True):
                         help="trace route with a simple DNS over UDP packet")
     parser.add_argument('--dnstcp', action='store_true',
                         help="trace route with a simple DNS over TCP packet")
+    parser.add_argument('--dnsdot', action='store_true',
+                        help="trace route with a DNS-over-TLS probe (TCP/853)")
+    parser.add_argument('--dnstt', action='store_true',
+                        help="trace route with a dnstt probe (DNS over UDP/53)")
+    parser.add_argument('--sni-test', dest='sni_test', action='store_true',
+                        help="test SNI filtering: send a TLS ClientHello over "
+                             "TCP/443 and detect RST injection")
     parser.add_argument('-c', '--continue', action='store_true',
                         help="further TTL advance after reaching the endpoint (up to max ttl)")
     parser.add_argument('-m', '--maxttl', type=int,
@@ -139,6 +173,35 @@ def get_args(sys_args, auto_exit=True):
                         help="same as 'new,rexmit' option (like Paris-Traceroute)")
     parser.add_argument('--port', type=int,
                         help="change the destination port in the packets")
+    # resilient timing + port rotation. Exposed on the CLI (in
+    # addition to config-file) so users can opt in without a config file; CLI
+    # wins over config per process_input_args' passed_args override.
+    parser.add_argument('--port-pool', dest='port_pool', type=str, default=None,
+                        help="CSV of clean (non-443-leaning) ports to rotate "
+                             "through; ignored if --port is set")
+    parser.add_argument('--timeout-profile', dest='timeout_profile', type=str,
+                        default=None, choices=['fast', 'degraded', 'shutdown'],
+                        help="named RTT profile: fast(1s)/degraded(3s)/"
+                             "shutdown(60s); explicit --timeout "
+                             "wins")
+    parser.add_argument('--adaptive-timeout', dest='adaptive_timeout',
+                        action='store_true',
+                        help="grow the per-hop timeout toward the last observed "
+                             "RTT, bounded by 60s; off by default so "
+                             "existing runs keep their timing")
+    parser.add_argument('--anonymize', dest='anonymize', action='store_true',
+                        help="also pseudonymise RFC1918 hops in the saved "
+                             "measurement. Your own source address "
+                             "is removed either way; this drops the shape of "
+                             "your access network too, so it is opt-in. CGNAT "
+                             "hops are kept — they are the carrier's, and the "
+                             "cgnat_hop detector reads them back")
+    parser.add_argument('--network-mode', dest='network_mode', type=str,
+                        default="auto",
+                        choices=['open', 'allowlisted', 'shutdown', 'auto'],
+                        help="override network-state behaviour: "
+                             "open/allowlisted/shutdown short-circuit or run full "
+                             "detection; 'auto' = detect (default)")
     # this argument ('-o', '--options') will be changed or removed before v1.0.0
     parser.add_argument('-o', '--options', type=str, default="new",
                         help=""" (this argument will be changed or removed before v1.0.0)
@@ -188,8 +251,10 @@ def main(args):
     edge_lable = "backttl"
     trace_retransmission = False
     trace_with_retransmission = False
+    network_mode = args.get("network_mode", "auto")
     iface = None
     dst_port = -1
+    port_pool_ports = None
     output_dir = os.getenv('TRACEVIS_OUTPUT_DIR', DEFAULT_OUTPUT_DIR)
     if not os.path.exists(output_dir):
         os.mkdir(output_dir)
@@ -207,6 +272,13 @@ def main(args):
         max_ttl = args["maxttl"]
     if args.get("timeout"):
         timeout = args["timeout"]
+    # pick the base timeout from a named profile when no
+    # explicit --timeout is supplied. Settable from a config file or, since
+    # M5a, the --timeout-profile flag; an explicit --timeout still wins.
+    timeout_profile = args.get("timeout_profile")
+    if timeout_profile:
+        timeout = utils.timing.resolve_timeout(
+            profile=timeout_profile, explicit=args.get("timeout"))
     if args.get("repeat"):
         repeat_requests = args["repeat"]
     if args.get("attach"):
@@ -223,6 +295,37 @@ def main(args):
         trace_with_retransmission = True
     if args.get("port"):
         dst_port = args["port"]
+    # when no explicit --port is set, rotate a clean
+    # (non-443-leaning) port pool. Picking one rotated port at trace start moves
+    # the probe off the aggressively-inspected port 443. Settable
+    # from a config file or, since M5a, the --port-pool flag; live per-hop
+    # RST-backoff rotation is provided by utils.portpool.PortRandomizer and
+    # wired in a later milestone.
+    port_pool_spec = args.get("port_pool")
+    # A port-bound probe (see PORT_BOUND_MODES) cannot be moved off its port
+    # without ceasing to be that probe. The pool is a convenience — "pick a
+    # clean port for me" — so it is dropped rather than honoured here. An
+    # explicit --port is a deliberate instruction and is still obeyed, with a
+    # warning, because "is UDP/2053 reachable at all?" is a legitimate question.
+    port_bound_modes = [mode for mode in PORT_BOUND_MODES if args.get(mode)]
+    if port_bound_modes:
+        named = ", ".join("--" + mode for mode in port_bound_modes)
+        if port_pool_spec:
+            print(f"Notice: --port-pool is ignored with {named}: rewriting the "
+                  "destination port would stop this being a DNS probe (nothing "
+                  "answers there). Use it with --sni-test or a packet sample.")
+            port_pool_spec = None
+        if dst_port != -1:
+            print(f"Warning: --port overrides the port {named} is defined by, "
+                  "so this measures reachability of that port, not DNS.")
+    if port_pool_spec and dst_port == -1:
+        try:
+            ports = utils.portpool.parse_port_pool(port_pool_spec)
+            dst_port = utils.portpool.PortRandomizer(ports=ports).next_port()
+            port_pool_ports = ports
+            print("· · · - · selected port from pool: " + str(dst_port))
+        except ValueError as exc:
+            print(f"Notice: invalid port_pool ({exc}); ignoring")
     if args.get("options"):
         trace_options = args["options"].replace(' ', '').split(',')
         if "new" in trace_options and "rexmit" in trace_options:
@@ -240,14 +343,34 @@ def main(args):
     if args.get("show_ifaces"):
         utils.iface.show_ifaces()
         sys.exit()
-    if args.get("dns") or args.get("dnstcp"):
+    if args.get("dns") or args.get("dnstcp") or args.get("dnsdot") or args.get("dnstt"):
         do_traceroute = True
         name_prefix += "dns"
-        packet_1, annotation_1, packet_2, annotation_2 = utils.dns.get_dns_packets(
-            blocked_address=blocked_address, accessible_address=accessible_address,
-            dns_over_tcp=(args["dnstcp"]))
+        if args.get("dnsdot"):
+            packet_1, annotation_1, packet_2, annotation_2 = utils.dns.get_dot_packets(
+                blocked_address=blocked_address, accessible_address=accessible_address)
+            default_resolvers = utils.dns.DOT_RESOLVERS
+        elif args.get("dnstt"):
+            packet_1, annotation_1, packet_2, annotation_2 = utils.dns.get_dnstt_packets(
+                blocked_address=blocked_address, accessible_address=accessible_address)
+            default_resolvers = utils.dns.DNSTT_RESOLVERS
+        else:
+            packet_1, annotation_1, packet_2, annotation_2 = utils.dns.get_dns_packets(
+                blocked_address=blocked_address, accessible_address=accessible_address,
+                dns_over_tcp=(args["dnstcp"]))
+            default_resolvers = utils.dns.DEFAULT_DNS_RESOLVERS
         if len(request_ips) == 0:
-            request_ips = DEFAULT_REQUEST_IPS
+            request_ips = use_default_targets(default_resolvers)
+    if args.get("sni_test"):
+        do_traceroute = True
+        name_prefix += "sni"
+        packet_1, annotation_1, packet_2, annotation_2 = utils.sni.make_sni_packets(
+            blocked_address=blocked_address, accessible_address=accessible_address)
+        do_tcph1 = True
+        do_tcph2 = True
+        default_resolvers = utils.dns.DOT_RESOLVERS
+        if len(request_ips) == 0:
+            request_ips = use_default_targets(default_resolvers)
     if args.get("packet") or args.get("rexmit"):
         do_traceroute = True
         name_prefix += "packet"
@@ -289,7 +412,19 @@ def main(args):
                 do_tcph1=do_tcph1, do_tcph2=do_tcph2,
                 trace_retransmission=trace_retransmission,
                 trace_with_retransmission=trace_with_retransmission, iface=iface,
-                dst_port=dst_port)
+                dst_port=dst_port, network_mode=network_mode,
+                port_pool=port_pool_ports,
+                adaptive_timeout=bool(args.get("adaptive_timeout")),
+                anonymize=bool(args.get("anonymize")))
+        except KeyboardInterrupt:
+            # Don't let Ctrl-C silently discard an in-progress trace: flush
+            # whatever partial hops were collected so the user keeps the graph.
+            print()
+            measurement_path = utils.trace.save_partial_measurement(
+                output_dir=output_dir, name_prefix=name_prefix,
+                continue_to_max_ttl=continue_to_max_ttl)
+            was_successful = bool(measurement_path)
+            no_internet = False
         except Exception as e:
             print(f"Error!\n{e!s}")
             sys.exit(2)

@@ -131,3 +131,16 @@ dmypy.json
 tracevis_data/
 .git/
 .github/
+
+# `__pycache__/` above only matches at the context root — .dockerignore
+# patterns are not implicitly recursive.
+**/__pycache__/
+.ruff_cache/
+
+# Measurement output: capture data, not application code. It is large and
+# records real addresses, so it has no business inside a published image.
+verify/
+new-res/
+newtes/
+*.zip
+
