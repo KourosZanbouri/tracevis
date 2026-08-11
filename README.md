@@ -8,6 +8,12 @@ Traceroute with any packet. Visualize the routes. Discover Middleboxes and Firew
 
 TraceVis is a research project whose main goal is to find middleboxes. Where a packet is tampered with or blocked. This tool also has other features such as downloading and visualizing traceroute data from RIPE Atlas probes.
 
+> **Origin.** TraceVis was created by the
+> [WikiCensorship](https://github.com/wikicensorship) project and last saw an
+> upstream release in September 2022. This repository picks the tool back up as
+> an independent line of development, preserving the original commit history and
+> authorship. Everything added since is in [CHANGELOG.md](CHANGELOG.md).
+
 
 ![example graph](https://user-images.githubusercontent.com/12384263/159377323-1e4e594e-aca8-4f91-8174-0ba58f6a6454.png)
 
@@ -469,9 +475,10 @@ docker run ghcr.io/kouroszanbouri/tracevis
 
 ## Credits and license
 
-TraceVis was created by the [WikiCensorship](https://github.com/wikicensorship)
-project ([wikicensorship/tracevis](https://github.com/wikicensorship/tracevis)).
-This repository continues that work as an independent fork; the original
-authors' commit history is preserved intact.
+Original tool and its design by the
+[WikiCensorship](https://github.com/wikicensorship) project —
+[wikicensorship/tracevis](https://github.com/wikicensorship/tracevis). The nine
+contributors listed on this repository are theirs as much as mine: their commits
+are preserved rather than squashed away, which is why they appear here.
 
 Released into the public domain under [the Unlicense](LICENSE), as upstream was.
