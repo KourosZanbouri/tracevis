@@ -45,7 +45,8 @@ class TestArguments(unittest.TestCase):
                     'timeout': None, 'repeat': None, 'ripe': None, 'ripemids': None, 'file': None, 'csv': False,
                     'csvraw': False, 'attach': False, 'label': None, 'domain1': None, 'domain2': None, 'annot1': None,
                     'annot2': None, 'rexmit': False, 'paris': False, 'options': 'new', 'iface': None, 'show_ifaces': False, 'port': None,
-                    'port_pool': None, 'timeout_profile': None, 'network_mode': 'auto'}
+                     'port_pool': None, 'timeout_profile': None, 'network_mode': 'auto', 'phase_overlay': False,
+                     'ipv4': False, 'vps': None, 'ioda_country': None}
         self._assert_args_subset(args, expected)
         # new DNS-family flags default to off
         self.assertFalse(args["dnsdot"])
@@ -180,6 +181,46 @@ class TestArguments(unittest.TestCase):
         # default when omitted
         args = tracevis.get_args([], auto_exit=False)
         self.assertEqual(args.get("network_mode"), 'auto')
+        sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+
+    def test_phase_overlay_flag(self):
+        from io import StringIO
+        out,err = StringIO(), StringIO()
+        sys.stdout, sys.stderr = out, err
+        args = tracevis.get_args(['--phase-overlay'], auto_exit=False)
+        self.assertTrue(args.get("phase_overlay"))
+        sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+
+    def test_ipv4_flag(self):
+        from io import StringIO
+        out,err = StringIO(), StringIO()
+        sys.stdout, sys.stderr = out, err
+        args = tracevis.get_args(['--ipv4'], auto_exit=False)
+        self.assertTrue(args.get("ipv4"))
+        sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+
+    def test_vps_flag(self):
+        from io import StringIO
+        out,err = StringIO(), StringIO()
+        sys.stdout, sys.stderr = out, err
+        args = tracevis.get_args(['--vps', '1001,2002'], auto_exit=False)
+        self.assertEqual(args.get("vps"), "1001,2002")
+        sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+
+    def test_ioda_country_flag(self):
+        from io import StringIO
+        out,err = StringIO(), StringIO()
+        sys.stdout, sys.stderr = out, err
+        args = tracevis.get_args(['--ioda-country', 'US'], auto_exit=False)
+        self.assertEqual(args.get("ioda_country"), "US")
+        sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+
+    def test_ioda_country_defaults_none(self):
+        from io import StringIO
+        out,err = StringIO(), StringIO()
+        sys.stdout, sys.stderr = out, err
+        args = tracevis.get_args([], auto_exit=False)
+        self.assertIsNone(args.get("ioda_country"))
         sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
 
 

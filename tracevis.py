@@ -12,6 +12,7 @@ from copy import deepcopy
 import utils.csv
 import utils.dns
 import utils.iface
+import utils.ioda
 import utils.packet_input
 import utils.portpool
 import utils.ripe_atlas
@@ -147,6 +148,14 @@ def get_args(sys_args, auto_exit=True):
                         help="set the number of repetitions of each request (default: 3 steps)")
     parser.add_argument('-R', '--ripe', type=str,
                         help="download the latest traceroute measuremets of a RIPE Atlas probe via ID and visualize")
+    parser.add_argument('-V', '--vps', type=str,
+                        help="comma-separated RIPE Atlas probe IDs for multi-VP download (§2.2). "
+                             "Downloads the same measurement from each probe and renders "
+                             "them in one combined graph with per-VP colour-coded edges.")
+    parser.add_argument('--ioda-country', dest='ioda_country', type=str,
+                        default=None,
+                        help="cross-check a RIPE Atlas VP against IODA outage status "
+                             "for this 2-letter country code (default: IR). Only used with --vps.")
     parser.add_argument('-I', '--ripemids', type=str,
                         help="add comma-separated RIPE Atlas measurement IDs (up to 12)")
     parser.add_argument('-f', '--file', type=str, action='append', nargs='+',
@@ -202,6 +211,13 @@ def get_args(sys_args, auto_exit=True):
                         help="override network-state behaviour: "
                              "open/allowlisted/shutdown short-circuit or run full "
                              "detection; 'auto' = detect (default)")
+    parser.add_argument('--phase-overlay', dest='phase_overlay',
+                        action='store_true',
+                        help="show an allowlisted-tier overlay legend on the "
+                             "rendered graph (backlog §2.4)")
+    parser.add_argument('--ipv4', dest='ipv4', action='store_true',
+                        help="force IPv4-only probing and socket binding "
+                             "(GitHub issue #69)")
     # this argument ('-o', '--options') will be changed or removed before v1.0.0
     parser.add_argument('-o', '--options', type=str, default="new",
                         help=""" (this argument will be changed or removed before v1.0.0)
@@ -430,6 +446,24 @@ def main(args):
             sys.exit(2)
         if no_internet:
             attach_jscss = True
+    if args.get("vps"):
+        measurement_ids = ""
+        if args.get("ripemids"):
+            measurement_ids = args["ripemids"].replace(' ', '').split(',')
+        name_prefix = name_prefix + "ripe-atlas-multi"
+        was_successful, measurement_path = utils.ripe_atlas.download_multi_from_atlas(
+            probe_ids=args["vps"], output_dir=output_dir, name_prefix=name_prefix,
+            measurement_ids=measurement_ids)
+        ioda_country = args.get("ioda_country") or "IR"
+        if was_successful:
+            try:
+                status = utils.ioda.fetch_ioda_status(ioda_country)
+                print(f"IODA status for {ioda_country}: "
+                      f"available={status['available']} "
+                      f"outage={status['outage']} "
+                      f"value={status['latest_value']}")
+            except Exception as e:
+                print(f"IODA fetch failed: {e}")
     if args.get("ripe"):
         measurement_ids = ""
         if args.get("ripemids"):
@@ -465,7 +499,8 @@ def main(args):
             dump_args_to_file(config_dump_file_name, args, input_packet)
         if utils.vis.vis(
                 measurement_path=measurement_path, attach_jscss=attach_jscss,
-                edge_lable=edge_lable):
+                edge_lable=edge_lable,
+                phase_overlay=bool(args.get("phase_overlay"))):
             print("finished.")
 
 

@@ -4,6 +4,7 @@ import html
 import ipaddress
 import json
 import os
+import socket
 
 import networkx as nx
 import pyvis._version
@@ -28,6 +29,14 @@ DPI_NAME = "SNI-inspected"
 FORGED_COLOR = "crimson"
 FORGED_NAME = "Forged reply (impersonating the destination)"
 
+# Backlog §2.3: a carrier-grade NAT hop (RFC 6598) — the tiered-access
+# allowlist boundary. Rendered distinctly from generic NAT so the tier
+# transition point is visible in the graph.
+CGNAT_COLOR = "teal"
+CGNAT_NAME = "CGNAT (allowlist boundary)"
+CGNAT_SHAPE = "hexagon"
+CGNAT_BORDER = "#20b2aa"
+
 ROUTER_NAME = "Router"
 WINDOWS_NAME = "Windows"
 LINUX_NAME = "Linux"
@@ -48,6 +57,23 @@ MAIN_TEMPLATE_PATH = os.path.dirname(
     __file__) + "/templates/template_main.html.jinja"
 
 multi_directed_graph = nx.MultiDiGraph()
+
+
+def resolve_or_ip(addr):
+    """Resolve a hostname to an IPv4 address, or pass through if already an IP.
+
+    Fixes GitHub issue #68: vis() crashes when src_addr or dst_addr is a
+    hostname instead of an IPv4 address.
+    """
+    try:
+        ipaddress.IPv4Address(addr)
+        return addr
+    except (ipaddress.AddressValueError, ValueError):
+        pass
+    try:
+        return socket.gethostbyname(addr)
+    except socket.gaierror:
+        return addr
 
 
 def get_packet_type(packet_obj):
@@ -204,11 +230,12 @@ def visualize(previous_node_id, current_node_id,
 def tooltips_append_lines(is_nat, is_middlebox, is_pep, packet_type, tcpflag,
                           dpi_cleared=False, cgnat_hop=False, sni_inspected=False,
                           rst_flood=False, tcp_silently_dropped=False,
-                          forgery_evidence=""):
+                          forgery_evidence="", is_cgnat_hop=False,
+                          allowlist_boundary=False):
     append_line = ''
     if packet_type == "TCP":
         append_line = "<br/>response TCP flag: " + tcpflag
-    return ("<br/>NAT: " + str(is_nat)
+    tooltip = ("<br/>NAT: " + str(is_nat)
             + "<br/>Middlebox: " + str(is_middlebox)
             + "<br/>PEP: " + str(is_pep)
             + "<br/>response packet: " + packet_type
@@ -220,6 +247,11 @@ def tooltips_append_lines(is_nat, is_middlebox, is_pep, packet_type, tcpflag,
             + "<br/>TCP silently dropped: " + str(tcp_silently_dropped)
             + ("<br/>REPLY FORGED: " + html.escape(forgery_evidence)
                if forgery_evidence else ""))
+    if is_cgnat_hop:
+        tooltip += "<br/>Per-hop CGNAT: True"
+    if allowlist_boundary:
+        tooltip += "<br/>Allowlist boundary: tier transition"
+    return tooltip
 
 
 def styled_tooltips(
@@ -257,7 +289,7 @@ def already_reached_destination_str(previous_node_id, dst_addr_id):
 def initialize_detected(length_all):
     nodes = []
     for _ in range(length_all):
-        nodes.append({"is_nat": False, "is_middlebox": False, "is_pep": False})
+        nodes.append({"is_nat": False, "is_middlebox": False, "is_pep": False, "is_cgnat": False})
     return nodes
 
 
@@ -268,7 +300,7 @@ def initialize_first_nodes_nx(src_addr, length_all):
     return nodes
 
 
-def save_measurement_graph(graph_name, attach_jscss):
+def save_measurement_graph(graph_name, attach_jscss, phase_overlay=False):
     net_vis = Network("1500px", "1500px",
                       directed=True, bgcolor="#eeeeee")
     if pyvis._version.__version__ > '0.1.9':
@@ -283,41 +315,90 @@ def save_measurement_graph(graph_name, attach_jscss):
     if graph_name.endswith(".json"):
         graph_name = graph_name[:-5]
     graph_path = graph_name + ".html"
-    # pyvis's save_graph() uses the OS default encoding (cp1252 on Windows),
-    # which fails with UnicodeEncodeError on Unicode chars in tooltips/payloads.
-    # Bypass by writing the HTML ourselves with explicit UTF-8 encoding.
     html_content = net_vis.generate_html()
+    if phase_overlay:
+        html_content = _inject_phase_overlay(html_content)
     with open(graph_path, "w", encoding="utf-8") as f:
         f.write(html_content)
     print("saved: " + graph_path)
 
 
-def vis(measurement_path, attach_jscss, edge_lable: str = "none"):
+def _inject_phase_overlay(html_content):
+    """Backlog §2.4: inject a phase/tier overlay legend into the rendered graph.
+
+    vis.js positions nodes dynamically at render time, so a CSS band cannot be
+    anchored to specific nodes. Instead the overlay is a legend indicator: a
+    coloured box with explanatory text that appears in the graph corner,
+    telling the operator that teal hexagon nodes mark the allowlisted tier
+    boundary.
+    """
+    overlay_html = (
+        '<div id="phase-overlay" style="'
+        'position:fixed;top:30px;right:20px;'
+        'width:140px;'
+        'background:rgba(46,139,87,0.85);'
+        'color:#fff;padding:8px;border-radius:8px;'
+        'font-size:12px;font-family:sans-serif;'
+        'border:2px solid #20b2aa;z-index:1000;">'
+        'Allowlisted tier<br/>'
+        '<span style="font-size:10px;">(teal hex = CGNAT boundary)</span>'
+        '</div>'
+    )
+    insertion_point = html_content.find("</body>")
+    if insertion_point == -1:
+        insertion_point = len(html_content)
+    return html_content[:insertion_point] + overlay_html + html_content[insertion_point:]
+
+
+def vis(measurement_path, attach_jscss, edge_lable: str = "none",
+        phase_overlay: bool = False):
     # The graph is module-level, and nothing used to clear it: a second call in
     # the same process rendered the first measurement's nodes into the second
     # file. The CLI renders once per run so it never surfaced there, but it made
     # `vis()` wrong as a function and impossible to test in isolation.
     multi_directed_graph.clear()
     all_measurements = []
-    was_successful = False
     with open(measurement_path) as json_file:
         all_measurements = json.load(json_file)
     measurement_steps = 0
     src_addr = all_measurements[0]["src_addr"]
+    src_addr = resolve_or_ip(src_addr)
     src_addr_id = 'x' + str(int(ipaddress.IPv4Address(src_addr))) + 'x'
     multi_directed_graph.add_node(
         src_addr_id, label=src_addr, color="Chocolate", title="source address",
         shape="diamond")
     for measurement in all_measurements:
+        curr_src_addr = measurement.get("src_addr", src_addr)
+        curr_src_addr = resolve_or_ip(curr_src_addr)
+        curr_src_id = 'x' + str(
+            int(ipaddress.IPv4Address(curr_src_addr))) + 'x'
+        if curr_src_id not in multi_directed_graph:
+            vp_label = "source address"
+            vp_id = measurement.get("vp")
+            if vp_id:
+                vp_label = f"source (VP {vp_id})"
+            multi_directed_graph.add_node(
+                curr_src_id, label=curr_src_addr,
+                color="Chocolate", title=vp_label, shape="diamond")
         dst_addr = measurement["dst_addr"]
+        dst_addr = resolve_or_ip(dst_addr)
         dst_addr_id = 'x' + str(int(ipaddress.IPv4Address(dst_addr))) + 'x'
         annotation = "-"
         if "annotation" in measurement.keys():
             annotation = measurement["annotation"]
+        vp_id = measurement.get("vp")
+        if vp_id:
+            annotation = f"VP {vp_id}" + (f" / {annotation}" if annotation != "-" else "")
+        ioda_status = measurement.get("ioda_status")
+        if ioda_status and isinstance(ioda_status, dict):
+            cc = ioda_status.get("country", "")
+            if ioda_status.get("outage"):
+                annotation = (f"{annotation} / IODA[{cc}]:"
+                              f" outage (value={ioda_status.get('latest_value', '?')})")
         all_results = measurement["result"]
         results_repeat_length = len(all_results[0]["result"])
         previous_node_ids = initialize_first_nodes_nx(
-            src_addr_id, results_repeat_length)
+            curr_src_id, results_repeat_length)
         already_detected = initialize_detected(results_repeat_length)
         for try_step in all_results:  # will be up to 255
             current_ttl = try_step["hop"]
@@ -372,6 +453,8 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none"):
                             current_edge_label = str(backttl)
                         current_node_id = 'x' + str(
                             int(ipaddress.IPv4Address(answer_ip))) + 'x'
+                        current_node_label = answer_ip
+                        packet_size = result.get("size", "*")
                         if "packets" in result.keys():
                             if "received" in result['packets'].keys():
                                 if len(result['packets']['received']) != 0:
@@ -407,6 +490,8 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none"):
                                     # held. It no longer does for new files.
                                     path_state = measurement.get("network_state") or (
                                         "allowlisted" if path_cgnat else "open")
+                                    cgnat_observed = utils.dpi.is_cgnat_address(
+                                        answer_ip)
                                     _hop = utils.dpi.classify_dpi_path(
                                         is_nat=is_nat,
                                         is_middlebox=is_middlebox or is_middlebox_ttl,
@@ -415,17 +500,29 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none"):
                                         sent_proto=probe_proto,
                                         sent_dport=probe_dport,
                                         rst_count=rst_count,
-                                        cgnat_observed=utils.dpi.is_cgnat_address(
-                                            answer_ip),
+                                        cgnat_observed=cgnat_observed,
                                     )
                                     dpi_cleared = path_cleared or (_hop.dpi_cleared and not path_sni)
                                     cgnat_hop = path_cgnat or _hop.cgnat_hop
                                     sni_inspected = path_sni or _hop.sni_inspected
                                     rst_flood = path_rst_flood or _hop.rst_flood
                                     tcp_silently_dropped = path_tcp_drop or _hop.tcp_silently_dropped
+                                    # Backlog §2.3: CGNAT is the allowlist
+                                    # boundary — render it distinctly from generic
+                                    # NAT so the tier transition is visible.
+                                    is_allowlist_boundary = (
+                                        cgnat_observed and path_state == "allowlisted"
+                                    )
                                     if (is_middlebox_ttl or is_middlebox
                                             ) and not already_detected[repeat_steps]["is_middlebox"]:
                                         pass  # we decide about it later
+                                    elif cgnat_observed and not already_detected[repeat_steps]["is_cgnat"]:
+                                        device_color = CGNAT_COLOR
+                                        device_name = CGNAT_NAME
+                                        current_node_shape = CGNAT_SHAPE
+                                        already_detected[repeat_steps]["is_cgnat"] = True
+                                        if current_node_id != dst_addr_id:
+                                            current_node_id = "cgnat" + current_node_id + "x"
                                     elif is_pep and not already_detected[repeat_steps]["is_pep"]:
                                         device_color = PEP_COLOR
                                         device_name = PEP_NAME
@@ -462,13 +559,17 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none"):
                                         dpi_cleared=dpi_cleared, cgnat_hop=cgnat_hop,
                                         sni_inspected=sni_inspected, rst_flood=rst_flood,
                                         tcp_silently_dropped=tcp_silently_dropped,
-                                        forgery_evidence=forgery_evidence)
+                                        forgery_evidence=forgery_evidence,
+                                        is_cgnat_hop=cgnat_observed,
+                                        allowlist_boundary=is_allowlist_boundary)
                                     if (is_middlebox_ttl or is_middlebox):
                                         already_detected[repeat_steps]["is_middlebox"] = True
                                     if is_pep:
                                         already_detected[repeat_steps]["is_pep"] = True
                                     if is_nat:
                                         already_detected[repeat_steps]["is_nat"] = True
+                                    if cgnat_observed:
+                                        already_detected[repeat_steps]["is_cgnat"] = True
                                 if is_forged_reply:
                                     # Takes precedence over the generic middlebox
                                     # marking below, which `parse_ttl` already
@@ -489,8 +590,10 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none"):
                                     already_detected[repeat_steps]["is_middlebox"] = True
                                 elif current_node_id == dst_addr_id:
                                     current_node_shape = "square"
-                                current_node_label = answer_ip
-                                packet_size = result["size"]
+                                    # Backlog §2.4: phase/tier overlay annotation on
+                                # the edge that crosses into the allowlisted tier.
+                                if is_allowlist_boundary and not current_edge_label:
+                                    current_edge_label = "→ allowlisted tier"
                     repeat_step_str = str(repeat_steps + 1)
                     current_edge_title = styled_tooltips(
                         current_request_color=(
@@ -511,5 +614,6 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none"):
                 repeat_steps += 1
         measurement_steps += 1
     print("saving measurement graph...")
-    save_measurement_graph(measurement_path, attach_jscss)
+    save_measurement_graph(measurement_path, attach_jscss,
+                           phase_overlay=phase_overlay)
     print("· · · - · -     · · · - · -     · · · - · -     · · · - · -")
