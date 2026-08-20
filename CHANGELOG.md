@@ -36,6 +36,37 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
   `parse_json` had already printed a tidy explanation.
 - `test/test_csv.py` added (13 tests); the module had none.
 
+### Added (backlog §2.2 — multi-vantage + IODA cross-check)
+- **`--vps`** flag: comma-separated RIPE Atlas probe IDs that download the same
+  measurement from each probe and render them in one combined graph with
+  per-VP colour-coded edges (reuses the existing `REQUEST_COLORS` cycle).
+  Each measurement entry is annotated with `"vp": probe_id` and the
+  annotation/tooltip surfaces it as `VP {id}`.
+- **`--ioda-country`** flag: cross-checks IODA v3 outage data for the given
+  2-letter country code (default: IR). When IODA reports an active outage,
+  the annotation gains `IODA[{CC}]: outage (value=...)`. The fetcher
+  degrades gracefully when the API is unreachable.
+
+### Added (GitHub issue #69 — `--ipv4` flag)
+- Explicit `--ipv4` CLI flag to force IPv4-only probing. The codebase was
+  already IPv4-only at the socket layer; the flag makes it explicit and
+  guards against future IPv6 paths.
+
+### Fixed (§2.2 — RIPE Atlas data format compatibility)
+- **`vis()` crashed on RIPE Atlas data.** The `packet_size` and
+  `current_node_label` assignments were nested inside `if "packets" in
+  result.keys():`, which only TraceVis-native measurements have. RIPE Atlas
+  traceroute hops put `size`, `rtt`, etc. at the top level without a `packets`
+  key, so `packet_size` stayed `"*"` while `elapsed_ms` was a float, causing
+  `TypeError` at `elapsed_ms / packet_size`. The two assignments are now
+  unconditional (`result.get("size", "*")`), so both data formats render.
+
+### Fixed (GitHub issue #68 — domain-based graph crash)
+- `vis()` called `ipaddress.IPv4Address(addr)` on `src_addr`/`dst_addr`, which
+  raised `AddressValueError` when the target was a hostname. Now resolves
+  hostnames to IPv4 via `socket.gethostbyname()` before node-id conversion.
+  `test/test_vis.py` adds `TestResolveOrIp` and `TestHostnameRendering`.
+
 ### Added (Milestone 7 — forged-reply detection, backlog §2.12)
 - **TraceVis now detects a reply the destination never sent.** This is the
   answer to the objection raised against §1.3: hardcoding `8.8.8.8` fixes the
