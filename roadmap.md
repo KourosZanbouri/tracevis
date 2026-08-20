@@ -125,10 +125,10 @@ Scope: `--anonymize`, drop IPython hard-dep, CHANGELOG, README update, release.
   against a labelled capture holding both forged and genuine replies, and
   validated to zero false positives across every measurement available.
 
-**The roadmap is complete.** What remains is in `backlog.md`: 2.3/2.4 (graph
-node types and tier overlay), 2.7 (`--monitor`), 2.1 (IPv6), 2.10 (needs a
-controlled endpoint), 2.2 (needs distributed probes), and 1.4 (needs
-rescoping first).
+**The roadmap is complete.** What remains is in `backlog.md`: 2.4 (node
+tint of allowlisted-tier nodes), 2.7 (`--monitor`), 2.1 (IPv6), 2.10 (needs a
+controlled endpoint), and 1.4 (needs rescope first). §2.2 (multi-VP + IODA)
+and §2.3 (CGNAT/allowlist node types + phase overlay) are shipped.
 
 ---
 

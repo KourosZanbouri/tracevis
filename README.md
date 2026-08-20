@@ -403,7 +403,7 @@ Regenerate them with
 fields are random on each build, which is correct — none of them carry real key
 material, and none needs to).
 
-##### Download traceroute data from a RIPE Atlas probe:
+##### Download traceroute data from a single RIPE Atlas probe:
 
 ```sh
 python3 ./tracevis.py --ripe [probe-id]
@@ -421,6 +421,18 @@ docker run \
     ghcr.io/kouroszanbouri/tracevis --ripe [probe-id]
 
 ```
+
+##### Download traceroute data from multiple RIPE Atlas probes (§2.2):
+
+```sh
+# Compare the same measurement from multiple vantage points
+python3 ./tracevis.py --vps [probe-id1,probe-id2,...] -I [msm-id1,msm-id2,...] --ioda-country IR --phase-overlay
+```
+
+`--vps` downloads the same measurement from each probe and renders them in one
+combined graph with per-VP colour-coded edges. `--ioda-country IR` (default)
+cross-checks IODA outage data and annotates VPs whose source is in an
+active-outage country.
 
 ##### Visualize a json file:
 
