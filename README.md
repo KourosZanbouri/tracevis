@@ -422,7 +422,7 @@ docker run \
 
 ```
 
-##### Download traceroute data from multiple RIPE Atlas probes (§2.2):
+##### Download traceroute data from multiple RIPE Atlas probes:
 
 ```sh
 # Compare the same measurement from multiple vantage points
