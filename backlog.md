@@ -6,8 +6,9 @@ Each item is an atomic, testable unit of work. Risk is estimated as
 > Legend: Priority = P0/P1/P2/P3.
 
 **Status at a glance.** Done: 1.1, 1.2, 1.3, 1.5, 1.6, 1.7, 1.8,
-1.9, 2.0, 2.2, 2.3, 2.5, 2.6, 2.8, 2.9, 2.11, 2.12, issue #68, issue #69. Partial: 2.4. Needs rescoping before it can be
-scheduled: 1.4. Genuinely open: 2.1, 2.7, 2.10.
+1.9, 2.0, 2.2, 2.3, 2.4, 2.5, 2.6, 2.8, 2.9, 2.11, 2.12, issue #68,
+issue #69. Needs rescoping before it can be scheduled: 1.4. Genuinely
+open: 2.1, 2.7, 2.10.
 
 **The roadmap is complete as of M6c; everything still open lives here.**
 
@@ -43,7 +44,7 @@ scheduled: 1.4. Genuinely open: 2.1, 2.7, 2.10.
 | ID | Task | Why | Risk | Depends on |
 |----|------|-----|------|------------|
 | 2.3 | ~~CGNAT/allowlist node types + phase overlay~~ **DONE** | The graph renders RFC 6598 hops as a distinct teal hexagon ("CGNAT (allowlist boundary)"), annotates the allowlist-boundary edge with a tier-transition label, and injects a phase-overlay legend via `--phase-overlay`. | M | 1.9 |
-| 2.4 | **PARTIAL** — edge annotation shipped (§2.3); CSS band legend injected via `--phase-overlay`; per-node tint of allowlisted-tier nodes not yet implemented | A trace can now mark the boundary crossing, but does not yet tint nodes downstream of the CGNAT as a visual band. | M | 1.2 |
+| 2.4 | ~~Allowlisted-tier node band~~ **DONE** | §2.3 shipped the boundary crossing (teal hexagon + tier-transition edge label); this is the band behind it. `mark_allowlisted_tier()` flags every node in the downstream cone of a CGNAT hop — a union over all boundaries and all vantage points, cycle-safe via `nx.descendants`, with boundary hops excluded from their own band. The marking is a *data* attribute; each renderer styles it in its own idiom (vis.js promotes `color` to `{background, border}`, Plotly uses the marker outline), so the device classification survives as the fill instead of being overwritten. Gated on `--phase-overlay`, which already owns the tier visualisation, so default rendering is unchanged. The legend now reports the band size — necessary, not cosmetic: across this repository's captures the band runs from 2 of 5 nodes to 97 of 100, and without the number a wide tier is indistinguishable from a broken marking. | M | 1.2 |
 | 2.5 | ~~Refresh sample configs to allowlisted/non-443 pool~~ **DONE (M5d; protocol shapes added M5e)** | Samples targeted SNI-blocked IPs on 443, so most of the pool measured the same block twice. M5e added probe shapes for three protocols that had none: WireGuard, Shadowsocks, gRPC-on-443. | L | 1.2, 1.5 |
 | 2.6 | ~~Refactor globals → Tracer class~~ **DONE (M5b)** | `trace.py`'s module globals made per-run state and testing awkward. *Note: parallel traces are still not possible — the delivered benefit is per-run state and testability, not concurrency.* | M | — |
 

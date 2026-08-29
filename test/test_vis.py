@@ -1371,3 +1371,119 @@ class TestPhaseOverlayEndToEnd(VisFixtureMixin, unittest.TestCase):
         page = self.render([make_measurement(cgnat_hop=True)],
                            phase_overlay=True, edge_lable="none")
         self.assertIn("1 teal hex", page)
+
+
+class TestAllowlistedTierMarking(unittest.TestCase):
+    """Backlog §2.4: the band of nodes behind the CGNAT allowlist boundary."""
+
+    @staticmethod
+    def _chain(*colors):
+        """A linear path n0 -> n1 -> ... with the given node colours."""
+        graph = utils.vis.nx.MultiDiGraph()
+        for i, color in enumerate(colors):
+            graph.add_node(f"n{i}", label=f"10.0.0.{i}", color=color)
+        for i in range(len(colors) - 1):
+            graph.add_edge(f"n{i}", f"n{i + 1}")
+        return graph
+
+    def test_marks_everything_downstream_of_the_boundary(self):
+        graph = self._chain("Chocolate", utils.vis.CGNAT_COLOR, "green", "red")
+        self.assertEqual(utils.vis.mark_allowlisted_tier(graph), 2)
+        self.assertTrue(graph.nodes["n2"]["allowlisted_tier"])
+        self.assertTrue(graph.nodes["n3"]["allowlisted_tier"])
+
+    def test_leaves_everything_upstream_alone(self):
+        graph = self._chain("Chocolate", utils.vis.CGNAT_COLOR, "green")
+        utils.vis.mark_allowlisted_tier(graph)
+        self.assertNotIn("allowlisted_tier", graph.nodes["n0"])
+
+    def test_the_boundary_is_not_inside_its_own_band(self):
+        # The CGNAT node is already drawn distinctly; folding it into the tier
+        # would make a second boundary downstream of the first disappear.
+        graph = self._chain("Chocolate", utils.vis.CGNAT_COLOR,
+                            utils.vis.CGNAT_COLOR, "green")
+        utils.vis.mark_allowlisted_tier(graph)
+        self.assertNotIn("allowlisted_tier", graph.nodes["n1"])
+        self.assertNotIn("allowlisted_tier", graph.nodes["n2"])
+        self.assertTrue(graph.nodes["n3"]["allowlisted_tier"])
+
+    def test_no_boundary_marks_nothing(self):
+        graph = self._chain("Chocolate", "green", "red")
+        self.assertEqual(utils.vis.mark_allowlisted_tier(graph), 0)
+        self.assertEqual(utils.vis.count_allowlisted_tier_nodes(graph), 0)
+
+    def test_a_routing_cycle_terminates(self):
+        # nx.descendants is cycle-safe; a hand-rolled walk was not, and a
+        # traced path really can loop.
+        graph = utils.vis.nx.MultiDiGraph()
+        graph.add_node("cg", color=utils.vis.CGNAT_COLOR)
+        graph.add_node("x", color="green")
+        graph.add_node("y", color="green")
+        graph.add_edges_from([("cg", "x"), ("x", "y"), ("y", "x")])
+        self.assertEqual(utils.vis.mark_allowlisted_tier(graph), 2)
+
+    def test_union_across_vantage_points(self):
+        """A node behind a boundary on *any* VP's path is in the tier."""
+        graph = utils.vis.nx.MultiDiGraph()
+        graph.add_node("vp1", color="Chocolate")
+        graph.add_node("vp2", color="Chocolate")
+        graph.add_node("cg", color=utils.vis.CGNAT_COLOR)
+        graph.add_node("shared", color="green")
+        graph.add_edges_from([("vp1", "cg"), ("cg", "shared"),
+                              ("vp2", "shared")])
+        # vp2 reached `shared` without crossing a boundary; vp1 did not.
+        self.assertEqual(utils.vis.mark_allowlisted_tier(graph), 1)
+        self.assertTrue(graph.nodes["shared"]["allowlisted_tier"])
+        self.assertNotIn("allowlisted_tier", graph.nodes["vp2"])
+
+    def test_only_the_downstream_cone_is_marked(self):
+        """Edges are directed; an unrelated branch must not be swept in."""
+        graph = utils.vis.nx.MultiDiGraph()
+        graph.add_node("src", color="Chocolate")
+        graph.add_node("cg", color=utils.vis.CGNAT_COLOR)
+        graph.add_node("behind", color="green")
+        graph.add_node("sibling", color="green")
+        graph.add_edges_from([("src", "cg"), ("cg", "behind"),
+                              ("src", "sibling")])
+        utils.vis.mark_allowlisted_tier(graph)
+        self.assertTrue(graph.nodes["behind"]["allowlisted_tier"])
+        self.assertNotIn("allowlisted_tier", graph.nodes["sibling"])
+
+    def test_count_matches_what_was_marked(self):
+        graph = self._chain("Chocolate", utils.vis.CGNAT_COLOR, "green", "red")
+        marked = utils.vis.mark_allowlisted_tier(graph)
+        self.assertEqual(marked, utils.vis.count_allowlisted_tier_nodes(graph))
+
+
+class TestPhaseOverlayReportsTheBand(unittest.TestCase):
+    """The band is often most of the graph, so the count has to be shown.
+
+    Without it a reader cannot tell "the allowlisted tier is wide" from "the
+    marking is broken" -- and on this repository's own captures the band runs
+    as high as 97 of 100 nodes.
+    """
+
+    def test_reports_the_tier_size(self):
+        html = utils.vis._inject_phase_overlay(
+            "<body></body>", cgnat_nodes=1, tier_nodes=97)
+        self.assertIn("97 nodes behind it", html)
+
+    def test_singular_tier(self):
+        html = utils.vis._inject_phase_overlay(
+            "<body></body>", cgnat_nodes=1, tier_nodes=1)
+        self.assertIn("1 node behind it", html)
+
+    def test_reports_an_empty_tier(self):
+        html = utils.vis._inject_phase_overlay(
+            "<body></body>", cgnat_nodes=0, tier_nodes=0)
+        self.assertIn("no nodes behind it", html)
+
+    def test_omitted_tier_keeps_the_old_caption(self):
+        html = utils.vis._inject_phase_overlay("<body></body>", cgnat_nodes=1)
+        self.assertIn("1 teal hex", html)
+        self.assertNotIn("behind it", html)
+
+    def test_caption_line_break_is_markup_not_an_escaped_newline(self):
+        html = utils.vis._inject_phase_overlay(
+            "<body></body>", cgnat_nodes=1, tier_nodes=4)
+        self.assertIn("<br/>4 nodes behind it", html)

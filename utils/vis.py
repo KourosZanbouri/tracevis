@@ -664,7 +664,48 @@ def count_cgnat_nodes(graph=None):
                if data.get("color") == CGNAT_COLOR)
 
 
-def _inject_phase_overlay(html_content, cgnat_nodes=None):
+def mark_allowlisted_tier(graph=None):
+    """Backlog §2.4: flag every node downstream of a CGNAT allowlist boundary.
+
+    The CGNAT hop is where a path leaves the operator's allowlisted tier, so
+    everything reachable *after* it is inside that tier. §2.3 shipped the
+    boundary itself (a teal hexagon) and the tier-transition edge label; this
+    is the band behind it, which was the half left open.
+
+    Marking is a union over all CGNAT nodes: a node reached post-boundary from
+    any vantage point belongs to the band, even when another VP reached the
+    same node without crossing one. ``nx.descendants`` follows directed edges
+    only, so this is the downstream cone and not the whole graph, and it
+    terminates on a routing cycle by construction.
+
+    Boundary nodes are excluded from their own band — they are already drawn
+    distinctly, and a second CGNAT hop downstream of the first should keep
+    reading as a boundary rather than dissolving into the tier behind it.
+
+    Sets ``allowlisted_tier=True`` and returns how many nodes were marked.
+    Styling is deliberately left to the renderer: this records the finding,
+    and each backend draws it in its own idiom.
+    """
+    graph = multi_directed_graph if graph is None else graph
+    boundaries = {node for node, data in graph.nodes(data=True)
+                  if data.get("color") == CGNAT_COLOR}
+    tier = set()
+    for node in boundaries:
+        tier |= nx.descendants(graph, node)
+    tier -= boundaries
+    for node in tier:
+        graph.nodes[node]["allowlisted_tier"] = True
+    return len(tier)
+
+
+def count_allowlisted_tier_nodes(graph=None):
+    """How many nodes mark_allowlisted_tier() has flagged."""
+    graph = multi_directed_graph if graph is None else graph
+    return sum(1 for _, data in graph.nodes(data=True)
+               if data.get("allowlisted_tier"))
+
+
+def _inject_phase_overlay(html_content, cgnat_nodes=None, tier_nodes=None):
     """Backlog §2.4: inject a phase/tier overlay legend into the rendered graph.
 
     vis.js positions nodes dynamically at render time, so a CSS band cannot be
@@ -677,6 +718,13 @@ def _inject_phase_overlay(html_content, cgnat_nodes=None):
     legend used to be a fixed caption, so it announced "teal hex = CGNAT
     boundary" over graphs holding no teal hexagon at all. It now says what was
     found, and says so plainly when the answer is nothing.
+
+    ``tier_nodes`` is how many nodes ``mark_allowlisted_tier`` flagged as
+    downstream of that boundary — the band the renderer outlines in teal.
+    Reporting it matters because the band is often most of the graph: when
+    the CGNAT sits at hop 2, nearly every node really is behind it, and a
+    reader needs the count to tell "the tier is wide" from "the marking is
+    broken".
     """
     if cgnat_nodes is None:
         caption = "(teal hex = CGNAT boundary)"
@@ -686,6 +734,11 @@ def _inject_phase_overlay(html_content, cgnat_nodes=None):
         caption = "(1 teal hex = CGNAT boundary)"
     else:
         caption = f"({cgnat_nodes} teal hexes = CGNAT boundary)"
+    if tier_nodes:
+        plural = "" if tier_nodes == 1 else "s"
+        caption += f"\n{tier_nodes} node{plural} behind it"
+    elif tier_nodes == 0:
+        caption += "\nno nodes behind it"
     overlay_html = (
         '<div id="phase-overlay" style="'
         'position:fixed;top:30px;right:20px;'
@@ -695,7 +748,8 @@ def _inject_phase_overlay(html_content, cgnat_nodes=None):
         'font-size:12px;font-family:sans-serif;'
         'border:2px solid #20b2aa;z-index:1000;">'
         'Allowlisted tier<br/>'
-        '<span style="font-size:10px;">' + html.escape(caption) + '</span>'
+        '<span style="font-size:10px;">'
+        + html.escape(caption).replace("\n", "<br/>") + '</span>'
         '</div>'
     )
     insertion_point = html_content.find("</body>")
@@ -1192,6 +1246,17 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
                 repeat_steps += 1
         measurement_steps += 1
     print("saving measurement graph...")
+    # Backlog §2.4: the tier band is gated on --phase-overlay, the flag that
+    # already owns the tier/phase visualisation. Default rendering is left
+    # exactly as it was.
+    if phase_overlay:
+        tier_nodes = mark_allowlisted_tier()
+        if tier_nodes:
+            print("· · · - · allowlisted tier: " + str(tier_nodes)
+                  + " node(s) downstream of the CGNAT boundary")
+        else:
+            print("· · · - · allowlisted tier: no CGNAT boundary on this "
+                  "capture; no band to draw")
     reverse_path_ips = None
     if reverse_path:
         reverse_path_ips = _find_vp_convergence(all_measurements)

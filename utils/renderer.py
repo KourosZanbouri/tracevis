@@ -24,6 +24,16 @@ RenderResult = namedtuple("RenderResult", ["html", "graph_path"])
 REVERSE_PATH_COLOR = "#FFA500"
 HIGHLIGHT_COLOR = "#ff9500"
 
+# Backlog §2.4: nodes behind the CGNAT allowlist boundary are outlined rather
+# than recoloured. The fill still carries the device classification the graph
+# exists to show (DPI orange, forged crimson, ...), so the band has to be an
+# additive marking or it would erase the finding it sits on top of. The colour
+# is the CGNAT node's own border, so the band reads as belonging to it.
+ALLOWLISTED_TIER_BORDER = "#20b2aa"
+ALLOWLISTED_TIER_BORDER_WIDTH = 4
+DEFAULT_NODE_BORDER = "#333"
+DEFAULT_NODE_BORDER_WIDTH = 1
+
 # A vendored Plotly bundle, if the operator dropped one in. Plotly.js is
 # ~3.5 MB, so it is not committed to the repository; when it is absent and
 # --attach was requested we say so rather than silently emitting a page that
@@ -48,6 +58,16 @@ def _reverse_path_edges(graph, reverse_path, reverse_path_ips):
         if graph.nodes[v].get("label", "") in reverse_path_ips:
             marked.add((u, v, k))
     return marked
+
+
+def _tier_nodes(graph):
+    """Nodes ``utils.vis.mark_allowlisted_tier`` flagged (backlog §2.4).
+
+    Read from the node attribute rather than recomputed here so both backends
+    agree by construction, and so the marking stays testable on its own.
+    """
+    return {node for node, data in graph.nodes(data=True)
+            if data.get("allowlisted_tier")}
 
 
 class Renderer:
@@ -88,13 +108,37 @@ class VisJsRenderer(Renderer):
         # flag drew its legend and marked nothing. The styling goes onto a
         # copy so the caller's graph is not mutated as a side effect.
         marked = _reverse_path_edges(graph, reverse_path, reverse_path_ips)
-        if marked:
+        tier = _tier_nodes(graph)
+        # Counted off the unstyled graph, before `graph` is rebound to the
+        # copy. count_cgnat_nodes() matches `color` against CGNAT_COLOR as a
+        # string, and the promotion below turns `color` into a dict; boundary
+        # nodes are excluded from the tier so it would survive today, but
+        # relying on that makes an unrelated future change silently zero the
+        # legend. Take the number while it is unambiguous.
+        cgnat_total = count_cgnat_nodes(graph)
+        if marked or tier:
+            # One copy covers both markings. networkx's copy() gives each node
+            # and edge a fresh attribute dict, so replacing a key here cannot
+            # reach the caller's graph -- which matters because
+            # count_cgnat_nodes() reads `color` off that graph as a string and
+            # would count zero if the promotion below leaked back into it.
             graph = graph.copy()
-            for u, v, k in marked:
-                # vis.js spells this "dashes" (bool or a dash-pattern array).
-                # "dash" is not a vis.js edge property and was ignored.
-                graph[u][v][k]["dashes"] = True
-                graph[u][v][k]["color"] = REVERSE_PATH_COLOR
+        for u, v, k in marked:
+            # vis.js spells this "dashes" (bool or a dash-pattern array).
+            # "dash" is not a vis.js edge property and was ignored.
+            graph[u][v][k]["dashes"] = True
+            graph[u][v][k]["color"] = REVERSE_PATH_COLOR
+        for node in tier:
+            # vis.js accepts a colour string or a {background, border} object.
+            # Promote to the object form so the device classification survives
+            # as the fill and the tier shows as the outline; overwriting
+            # `color` outright would erase the DPI/NAT/forged colouring.
+            data = graph.nodes[node]
+            fill = data.get("color", "gray")
+            if isinstance(fill, str):
+                data["color"] = {"background": fill,
+                                 "border": ALLOWLISTED_TIER_BORDER}
+            data["borderWidth"] = ALLOWLISTED_TIER_BORDER_WIDTH
 
         net_vis = Network("1500px", "1500px",
                           directed=True, bgcolor="#eeeeee")
@@ -113,7 +157,8 @@ class VisJsRenderer(Renderer):
         html_content = net_vis.generate_html()
         if phase_overlay:
             html_content = _inject_phase_overlay(
-                html_content, cgnat_nodes=count_cgnat_nodes(graph))
+                html_content, cgnat_nodes=cgnat_total,
+                tier_nodes=len(tier))
         if highlight_selected:
             html_content = _inject_edge_highlight(html_content)
         # Only label the graph when at least one edge actually carries the
@@ -195,9 +240,12 @@ class PlotlyRenderer(Renderer):
         pos = self._layered_layout(graph)
         marked = _reverse_path_edges(graph, reverse_path, reverse_path_ips)
 
+        tier = _tier_nodes(graph)
+
         node_index = {}
         nodes_x, nodes_y = [], []
         node_text, node_color, node_shape, node_titles = [], [], [], []
+        node_line_color, node_line_width = [], []
         for node_id in graph.nodes():
             node_index[node_id] = len(nodes_x)
             x, y = pos[node_id]
@@ -207,6 +255,15 @@ class PlotlyRenderer(Renderer):
             node_color.append(graph.nodes[node_id].get("color", "gray"))
             node_shape.append(graph.nodes[node_id].get("shape", "dot"))
             node_titles.append(graph.nodes[node_id].get("title", ""))
+            # Backlog §2.4: Plotly has no {background, border} colour object,
+            # so the band is carried on the marker outline instead. Same
+            # meaning as the vis.js promotion, expressed in Plotly's idiom.
+            in_tier = node_id in tier
+            node_line_color.append(
+                ALLOWLISTED_TIER_BORDER if in_tier else DEFAULT_NODE_BORDER)
+            node_line_width.append(
+                ALLOWLISTED_TIER_BORDER_WIDTH if in_tier
+                else DEFAULT_NODE_BORDER_WIDTH)
 
         edges = []
         for src, dst, key, edge_data in graph.edges(keys=True, data=True):
@@ -228,13 +285,15 @@ class PlotlyRenderer(Renderer):
             nodes_x=nodes_x, nodes_y=nodes_y, node_text=node_text,
             node_color=node_color, node_shape=node_shape,
             node_titles=node_titles, edges=edges,
+            node_line_color=node_line_color, node_line_width=node_line_width,
             highlight_selected=highlight_selected,
             attach_jscss=attach_jscss,
         )
 
         if phase_overlay:
             html = _inject_phase_overlay(
-                html, cgnat_nodes=count_cgnat_nodes(graph))
+                html, cgnat_nodes=count_cgnat_nodes(graph),
+                tier_nodes=len(tier))
         if reverse_path and reverse_path_ips:
             html = _inject_reverse_path_legend(html)
 
@@ -267,12 +326,21 @@ class PlotlyRenderer(Renderer):
         return '<script src="' + PLOTLY_CDN + '"></script>'
 
     def _build_html(self, nodes_x, nodes_y, node_text, node_color, node_shape,
-                    node_titles, edges, highlight_selected, attach_jscss):
+                    node_titles, edges, highlight_selected, attach_jscss,
+                    node_line_color=None, node_line_width=None):
         """Generate the Plotly HTML document."""
+        # Default to the plain outline so a caller that predates the tier band
+        # still renders, rather than emitting undefined into the marker spec.
+        if node_line_color is None:
+            node_line_color = [DEFAULT_NODE_BORDER] * len(nodes_x)
+        if node_line_width is None:
+            node_line_width = [DEFAULT_NODE_BORDER_WIDTH] * len(nodes_x)
         data = {
             "nodes_x": nodes_x, "nodes_y": nodes_y, "node_text": node_text,
             "node_color": node_color, "node_shape": node_shape,
             "node_titles": node_titles, "edges": edges,
+            "node_line_color": node_line_color,
+            "node_line_width": node_line_width,
             "highlight_color": HIGHLIGHT_COLOR,
             "highlight_enabled": bool(highlight_selected),
         }
@@ -353,20 +421,26 @@ PLOTLY_DRAW_JS = r"""
     for (var i = 0; i < nodes_x.length; i++) {
         var marker = SHAPE_MARKERS[GRAPH.node_shape[i] || 'dot'] || 'circle';
         if (!shapes[marker]) {
-            shapes[marker] = {x: [], y: [], labels: [], colors: [], titles: []};
+            shapes[marker] = {x: [], y: [], labels: [], colors: [],
+                              titles: [], lineColors: [], lineWidths: []};
         }
         shapes[marker].x.push(nodes_x[i]);
         shapes[marker].y.push(nodes_y[i]);
         shapes[marker].labels.push(GRAPH.node_text[i]);
         shapes[marker].colors.push(GRAPH.node_color[i]);
         shapes[marker].titles.push(GRAPH.node_titles[i]);
+        // Backlog §2.4: the allowlisted-tier band. Nodes are grouped into one
+        // trace per marker symbol, so the outline has to travel as a
+        // per-point array or every node in a trace would take one node's.
+        shapes[marker].lineColors.push(GRAPH.node_line_color[i]);
+        shapes[marker].lineWidths.push(GRAPH.node_line_width[i]);
     }
     Object.keys(shapes).forEach(function (marker) {
         var d = shapes[marker];
         traces.push({
             x: d.x, y: d.y, mode: 'markers+text', type: 'scatter',
             marker: {symbol: marker, size: 14, color: d.colors,
-                     line: {color: '#333', width: 1}},
+                     line: {color: d.lineColors, width: d.lineWidths}},
             text: d.labels, textposition: 'top center',
             customdata: d.titles,
             hovertemplate: '%{customdata}<extra></extra>',

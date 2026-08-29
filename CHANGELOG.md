@@ -5,6 +5,68 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (backlog §2.4 — the allowlisted-tier node band)
+- **`mark_allowlisted_tier()` in `utils/vis.py`** flags every node in the
+  downstream cone of a CGNAT hop. §2.3 shipped the boundary itself (a teal
+  hexagon) and the tier-transition edge label; the band behind it was the half
+  left open, which is why §2.4 stood as PARTIAL.
+
+  Semantics, chosen deliberately: the marking is a **union** over every
+  boundary and every vantage point, so a node reached post-boundary by any VP
+  is in the tier even when another VP reached it without crossing one.
+  `nx.descendants` follows directed edges, so this is the downstream cone and
+  not the whole graph, and it terminates on a routing cycle by construction.
+  Boundary hops are excluded from their own band, so a second CGNAT downstream
+  of the first still reads as a boundary rather than dissolving into the tier.
+
+- **The band is an outline, not a recolour.** `utils/vis.py` records
+  `allowlisted_tier` as a node *attribute* and each renderer styles it in its
+  own idiom: `VisJsRenderer` promotes the node's `color` string to vis.js's
+  `{background, border}` object, `PlotlyRenderer` uses the marker outline
+  (Plotly has no border-colour field). Overwriting `color` outright would have
+  erased the DPI/NAT/PEP/forged classification the graph exists to show — on
+  the widest capture that is 97 of 100 nodes losing their device colour.
+
+- **`count_allowlisted_tier_nodes()`**, and the `--phase-overlay` legend now
+  reports the band size alongside the boundary count. This is not decoration:
+  across this repository's captures the band runs from 2 of 5 nodes up to 97 of
+  100, and without the number a wide tier and a broken marking look identical.
+
+- Gated on `--phase-overlay`, the flag that already owns the tier
+  visualisation, so no graph gains a band unless it was asked for. Verified by
+  rendering all 19 captures on both backends at `v1.2.0` and again after the
+  change: the 19 vis.js pages are **byte-for-byte identical**. The Plotly
+  pages are not, and the difference is worth stating precisely — the marker
+  spec moved from a scalar `line: {color: '#333', width: 1}` to the per-point
+  `line: {color: d.lineColors, width: d.lineWidths}`, and the payload gained
+  two arrays. On a graph with no tier those arrays hold nothing but the
+  default outline, and Plotly renders a uniform per-point array exactly as it
+  renders the scalar; both versions were executed under node and produce
+  equivalent traces. So the bytes differ and the rendered page does not.
+
+### Notes (§2.4)
+- Validated across all 19 captures in the repository: the data model, the
+  vis.js payload and the Plotly payload agree on the tier size for every one
+  of them, and the four captures with no CGNAT hop mark zero nodes.
+- The Plotly band is asserted by **executing** the emitted script under node
+  against a mock `Plotly`, not by inspecting the payload handed to it. The
+  payload-level assertions all passed while the marker spec still hardcoded a
+  scalar outline — the band was computed, serialised, and then discarded at
+  the point Plotly was called. That is the same shape of defect as the
+  reverse-path styling applied after `from_nx()`, and only running the script
+  catches it.
+- The legend's CGNAT count is taken from the unstyled graph. Boundary nodes
+  are excluded from the tier, so reading it off the styled copy survives
+  today by accident — `count_cgnat_nodes()` matches `color` against
+  `CGNAT_COLOR` as a string, and the promotion turns `color` into a dict.
+
+### Known, not changed
+- `utils.vis.vis()` has no return statement, so `if utils.vis.vis(...)` in
+  `tracevis.py` is always falsy and the closing `finished.` is never printed.
+  Pre-existing (reproduced at `v1.1.0`), cosmetic, and left for the `--monitor`
+  work, which needs real run-success signalling rather than a patched-over
+  truthiness check.
+
 ## [1.2.0] — 2026-08-29
 
 ### Added (GitHub issue #44 — reverse-path detection via VP convergence)

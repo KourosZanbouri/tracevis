@@ -270,9 +270,24 @@ flags change what it shows and how it is drawn.
   with `--vps`, or with several `-f` files combined. Matching edges are drawn
   dashed amber with a legend; with a single VP the run says there was nothing
   to mark and draws no legend.
-- `--phase-overlay` — allowlisted-tier overlay legend (backlog §2.4). The
-  legend reports how many CGNAT boundary hops the graph actually contains, and
-  says so when there are none.
+- `--phase-overlay` — allowlisted-tier overlay legend and node band
+  (backlog §2.4). The CGNAT hop is where a path leaves the operator's
+  allowlisted tier, so every node reachable *after* it is inside that tier.
+  Those nodes are outlined in teal — an outline, not a recolour, so the fill
+  still carries the device classification (DPI orange, forged crimson, NAT
+  blue, …) that the graph exists to show. Both renderers draw it; Plotly uses
+  the marker outline since it has no separate border colour.
+
+  The legend reports how many CGNAT boundary hops the graph contains **and how
+  many nodes sit behind them**, and says so plainly when there are none. The
+  count matters: when the CGNAT sits at hop 2 the band really is most of the
+  graph — on this repository's own captures it ranges from 2 of 5 nodes up to
+  97 of 100 — and the number is what tells you a wide band from a broken one.
+
+  A node counts as inside the tier if *any* vantage point reached it after
+  crossing a boundary, even when another VP reached the same node without
+  crossing one. Boundary hops are excluded from their own band, so a second
+  CGNAT downstream of the first still reads as a boundary.
 - `-a` / `--attach` — embed the JS/CSS in the page instead of linking a CDN.
 
 ### Offline pages on censored networks
