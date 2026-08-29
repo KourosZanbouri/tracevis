@@ -10,6 +10,7 @@ import sys
 import textwrap
 from copy import deepcopy
 
+import utils.arms
 import utils.csv
 import utils.dns
 import utils.iface
@@ -256,6 +257,12 @@ def get_args(sys_args, auto_exit=True):
                         "(GitHub issue #44; needs a measurement holding the "
                         "same destination from 2+ vantage points, via --vps "
                         "or several -f files)")
+    parser.add_argument('--compare-arms', dest='compare_arms',
+                        action='store_true',
+                        help="compare paired control/treatment probes in the "
+                             "measurement and report what each pair supports "
+                             "(backlog 2.10). Works on a fresh trace or on an "
+                             "existing capture via -f.")
     parser.add_argument('--monitor', dest='monitor', action='store_true',
                         help="repeat the trace on an interval and report what "
                              "changed between runs (backlog 2.7). Applies to "
@@ -311,6 +318,28 @@ def render_measurement(args, measurement_path, attach_jscss, edge_lable,
         highlight_selected=bool(args.get("highlight_selected")),
         renderer=args.get("renderer", "visjs"),
         reverse_path=bool(args.get("reverse_path")))
+
+
+def report_arm_comparison(measurement_path):
+    """Backlog §2.10: compare paired control/treatment probes in a capture.
+
+    Printed rather than written into the measurement: it is an interpretation
+    of the data, and interpretations belong beside the data rather than inside
+    it, where a later re-read could not tell the two apart.
+    """
+    try:
+        with open(measurement_path, encoding="utf-8") as handle:
+            measurements = json.load(handle)
+    except (OSError, ValueError) as exc:
+        print(f"· · · - · --compare-arms: could not read the measurement: {exc}")
+        return None
+    if not isinstance(measurements, list):
+        print("· · · - · --compare-arms: not a measurement list")
+        return None
+    verdicts = utils.arms.compare_arms(measurements)
+    print()
+    print(utils.arms.format_arms(verdicts))
+    return verdicts
 
 
 def run_monitored_session(args, trace_kwargs, edge_lable, input_packet,
@@ -644,6 +673,8 @@ def main(args):
             utils.csv.json2csv(measurement_path, False)
         else:
             was_successful = True
+    if was_successful and args.get("compare_arms"):
+        report_arm_comparison(measurement_path)
     if was_successful and render_measurement(
             args, measurement_path, attach_jscss, edge_lable, input_packet):
         print("finished.")

@@ -237,5 +237,69 @@ class TestTracerouteStructM4Fields(unittest.TestCase):
         self.assertIn('"tcp_silently_dropped": true', blob)
 
 
+class TestClearedRequiresTheProbeToHaveArrived(unittest.TestCase):
+    """`dpi_cleared` claimed a clean path for probes that never got there.
+
+    The flag means "nothing interfered with this path". It was computed
+    without any term for whether the probe reached the destination, and the
+    two guards that might have stood in for one both had holes:
+    `tcp_silently_dropped` is gated on `sent_proto == "TCP"` and on no
+    middlebox being tagged. So a UDP probe that never arrived, and a TCP
+    probe that never arrived on a path with a visible middlebox, were both
+    reported as cleared. Across this repository's stored captures that was
+    38 of 96 measurements.
+    """
+
+    def test_udp_that_never_reached_is_not_cleared(self):
+        # The wireguard sample: eight arms, none reaching its destination,
+        # every one of them previously marked cleared.
+        signal = classify_dpi_path(
+            sent_proto="UDP", sent_dport=51820, network_state="open",
+            dst_reached=False)
+        self.assertFalse(signal.dpi_cleared)
+
+    def test_tcp_that_never_reached_behind_a_middlebox_is_not_cleared(self):
+        # sni_inspected is False (not port 443) and tcp_silently_dropped is
+        # False (a middlebox was tagged), so nothing else blocked the claim.
+        signal = classify_dpi_path(
+            sent_proto="TCP", sent_dport=80, is_middlebox=True,
+            network_state="open", dst_reached=False)
+        self.assertFalse(signal.sni_inspected)
+        self.assertFalse(signal.tcp_silently_dropped)
+        self.assertFalse(signal.dpi_cleared)
+
+    def test_a_genuinely_clean_tcp_path_is_still_cleared(self):
+        signal = classify_dpi_path(
+            sent_proto="TCP", sent_dport=443, network_state="open",
+            dst_reached=True)
+        self.assertTrue(signal.dpi_cleared)
+
+    def test_a_genuinely_clean_udp_path_is_still_cleared(self):
+        signal = classify_dpi_path(
+            sent_proto="UDP", sent_dport=53, network_state="open",
+            dst_reached=True)
+        self.assertTrue(signal.dpi_cleared)
+
+    def test_no_udp_drop_flag_is_asserted(self):
+        """Declining to claim "cleared" is supportable; claiming "dropped" is not.
+
+        Silence from a closed UDP port is indistinguishable from an on-path
+        drop without a destination that would answer, so the signal set must
+        not grow a `udp_silently_dropped` sibling that asserts one.
+        """
+        signal = classify_dpi_path(
+            sent_proto="UDP", sent_dport=51820, network_state="open",
+            dst_reached=False)
+        self.assertNotIn("udp_silently_dropped", signal._fields)
+        self.assertFalse(signal.tcp_silently_dropped)
+
+    def test_reaching_the_destination_does_not_override_real_interference(self):
+        signal = classify_dpi_path(
+            sent_proto="TCP", sent_dport=443, network_state="open",
+            dst_reached=True, rst_count=9)
+        self.assertTrue(signal.rst_flood)
+        self.assertFalse(signal.dpi_cleared)
+
+
 if __name__ == "__main__":
     unittest.main()

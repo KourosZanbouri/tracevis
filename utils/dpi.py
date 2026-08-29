@@ -168,11 +168,28 @@ def classify_dpi_path(
     # something on the path answered in the destination's name. A path cannot be
     # "cleared" and impersonated at once, and the two flags used to be able to
     # say so in the same measurement.
+    #
+    # `dst_reached` is a term because without it the flag claimed a clean path
+    # for a probe that never arrived. `tcp_silently_dropped` covered the TCP
+    # case, but it is gated on `sent_proto == "TCP"` and on no middlebox being
+    # tagged, so two paths escaped: a UDP probe that never reached the
+    # destination, and a TCP probe that did not reach it on a path with a
+    # visible middlebox. Both reported `dpi_cleared=True` -- "nothing
+    # interfered with this path" -- about a probe with no evidence it got
+    # anywhere. The repository's own wireguard sample is the UDP case: eight
+    # arms, none reaching its destination, every one of them marked cleared.
+    #
+    # There is deliberately no `udp_silently_dropped` sibling. Silence from a
+    # closed UDP port is indistinguishable from an on-path drop without a
+    # destination that would answer, and a flag asserting a drop the tool
+    # cannot actually observe would be worse than the gap it fills. Declining
+    # to claim "cleared" is supportable; claiming "dropped" is not.
     dpi_cleared = (
         not bool(reply_forged)
         and not sni_inspected
         and not rst_flood
         and not tcp_silently_dropped
+        and bool(dst_reached)
         and network_state == "open"
     )
 

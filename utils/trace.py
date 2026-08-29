@@ -297,6 +297,9 @@ class Tracer:
         # Per-probe evidence from a handshake that never completed.
         self.handshake_rst_count = 0
         self.handshake_failure_note = ""
+        # ...and from one that did. None means no handshake was attempted on
+        # this probe, so nothing is recorded; True/False means it was.
+        self.handshake_ok = None
         # Set once the trace knows what it is measuring; `finalise_measurements`
         # needs it and the interrupt path has no other way to reach it.
         self.classification_context = None
@@ -373,11 +376,13 @@ class Tracer:
             # far was lost. Seen in the field.
             self.handshake_rst_count += count_rst_responses(ans)
             syn_ack = find_syn_ack(ans)
+            self.handshake_ok = syn_ack is not None
             if syn_ack is None:
                 refused = True
                 self.handshake_failure_note = (
                     "[no SYN-ACK: " + describe_answer(ans) + "]")
         if syn_ack is None:
+            self.handshake_ok = False
             if refused:
                 print("Error: TCP handshake to " + ip_address + ":"
                       + str(destination_port) + " was answered by "
@@ -517,6 +522,7 @@ class Tracer:
         this_request[IP].ttl = current_ttl
         self.handshake_rst_count = 0
         self.handshake_failure_note = ""
+        self.handshake_ok = None
         if self.current_dport is not None:
             change_dst_port(this_request, self.current_dport)
         self.last_probe_dport = None
@@ -1092,7 +1098,7 @@ class Tracer:
                                     trace_retransmission, False)
                                 self._record_rtt(probe_key, answer_ip, elapsed_ms)
                                 self.measurement_data[access_block_steps][ip_steps].add_hop(
-                                    current_ttl, answer_ip, elapsed_ms, packet_size, req_answer_ttl, answer_summary, answered, unanswered, rst_count, self.last_probe_dport
+                                    current_ttl, answer_ip, elapsed_ms, packet_size, req_answer_ttl, answer_summary, answered, unanswered, rst_count, self.last_probe_dport, self.handshake_ok
                                 )
                             else:
                                 sleep_time = 0
@@ -1110,7 +1116,7 @@ class Tracer:
                                 trace_retransmission, False)
                             self._record_rtt(probe_key, answer_ip, elapsed_ms)
                             self.measurement_data[access_block_steps][ip_steps].add_hop(
-                                current_ttl, answer_ip, elapsed_ms, packet_size, req_answer_ttl, answer_summary, answered, unanswered, rst_count, self.last_probe_dport
+                                current_ttl, answer_ip, elapsed_ms, packet_size, req_answer_ttl, answer_summary, answered, unanswered, rst_count, self.last_probe_dport, self.handshake_ok
                             )
                         if not_yet_destination:
                             if answer_ip == "***":

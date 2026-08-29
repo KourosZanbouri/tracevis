@@ -5,6 +5,69 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (`dpi_cleared` claimed a clean path for probes that never arrived)
+- **`utils/dpi.py` computed `dpi_cleared` with no term for whether the probe
+  reached the destination.** The flag means "nothing interfered with this
+  path", and the two guards that might have stood in for one both had holes:
+  `tcp_silently_dropped` is gated on `sent_proto == "TCP"` *and* on no
+  middlebox being tagged. So a UDP probe that never arrived, and a TCP probe
+  that never arrived on a path with a visible middlebox, were both reported as
+  cleared.
+
+  Measured across the repository's own captures: **38 of 96 stored
+  measurements** — 40% — carried `dpi_cleared=True` about a probe that never
+  reached its destination. Not only UDP; the `rotation-sni` partial capture
+  has six TCP measurements in the same state.
+
+  There is deliberately **no** `udp_silently_dropped` sibling. Silence from a
+  closed UDP port is indistinguishable from an on-path drop without a
+  destination that would answer, and a flag asserting a drop the tool cannot
+  observe would be worse than the gap it fills. Declining to claim "cleared"
+  is supportable; claiming "dropped" is not.
+
+### Added (backlog §2.10 — arm comparison, and the datum that settles it)
+- **`utils/trace.py` now records TCP handshake *success*, not only failure.**
+  The handshake runs to the destination without a TTL limit, so a SYN-ACK is
+  proof the destination was reachable at that moment — which is exactly what
+  separates "the path dropped this payload" from "the destination was never
+  reachable". Only failure had ever been recorded, and only as free text, so a
+  capture could not carry the argument. It is now a per-hop `handshake`
+  boolean, written only when a handshake was actually attempted: absent means
+  "not tried", which is a different finding from "it failed".
+- **New module `utils/arms.py`** and `--compare-arms`, which pairs
+  control/treatment probes per destination and reports what each pair
+  supports, with an explicit confidence and — where the question is still
+  open — what would settle it.
+- The backlog entry for §2.10 was **wrong and is corrected**. It recorded the
+  samples as unanswerable without a controlled endpoint. Re-reading the
+  captures:
+  - `grpc-h2c` / `shadowsocks`: the control reaches `1.1.1.1` at hop 10/9 with
+    a `PSH-ACK` carrying payload; the treatment, on an identical path (same
+    first three hops), same port and same destination, gets nothing across 20
+    hops. Verdict *payload probably dropped on path*, moderate — held back
+    from "strong" only because these captures predate the `handshake` field.
+    A re-run settles them with **no new endpoint**.
+  - `wireguard`: both arms die at hop 3 on all four destinations, so the block
+    is not payload-based — it is the port or the path. That is a result, not a
+    failure to measure.
+  - An endpoint is still genuinely required for the UDP arm, where silence
+    from a closed port cannot be told from an on-path drop.
+
+### Changed (a test contract, deliberately)
+- `test_a_plain_timeout_still_serialises_without_a_note` asserted that a star
+  hop serialises as exactly `["packets", "x"]`. On a probe that attempted a
+  handshake it now also carries the handshake verdict, which is the whole
+  point of the change — a star hop is precisely where the question is asked.
+  Renamed and re-documented, and the half of the contract that still holds is
+  pinned by a new test: a trace that never attempts a handshake serialises
+  exactly as it did before.
+
+### Known, not changed
+- `tracevis.py -f <malformed.json>` exits with an unhandled `JSONDecodeError`
+  from `utils/vis.py`. Pre-existing — reproduced identically at HEAD before
+  this work — and separate from the §2.10 changes; `--compare-arms` reports
+  the same file cleanly and carries on.
+
 ### Fixed (data loss — measurement files could silently overwrite each other)
 - **`utils/trace.py` never checked whether a measurement filename was free.**
   Names are stamped to the minute (`%Y%m%d-%H%M`), so two runs inside the same

@@ -290,6 +290,36 @@ flags change what it shows and how it is drawn.
   CGNAT downstream of the first still reads as a boundary.
 - `-a` / `--attach` — embed the JS/CSS in the page instead of linking a CDN.
 
+### Comparing paired probes
+
+Several samples send two probes to the same destination and port, differing
+only in payload: a **control** the network is known to pass, and a
+**treatment** whose fate is the question. `--compare-arms` pairs them and says
+what the result supports:
+
+```
+python3 ./tracevis.py -f tracevis_data/grpc-h2c-....json --compare-arms
+```
+
+It reports a verdict, a confidence, and — when the question is still open —
+what would settle it. The verdicts are:
+
+| verdict | what it means |
+|---|---|
+| payload dropped on path | the treatment's handshake reached the destination, so it was reachable, and the payload still got nothing back |
+| payload probably dropped on path | the control got through and the treatment did not, but the capture does not record the treatment's handshake |
+| destination unreachable for the treatment | the handshake never completed, so the payload was never delivered and the pairing says nothing about it |
+| port or path blocked regardless of payload | both arms died at the same hop — whatever stopped them, it was not the payload |
+| both arms delivered | nothing on the path dropped either |
+| control failed | the pairing is inverted or the control is wrong, so it proves nothing |
+
+The distinction rests on the TCP handshake, which is not TTL-limited: a
+SYN-ACK proves the destination was reachable at that moment, so a data probe
+that then gets nothing was dropped rather than declined — a server that
+dislikes a payload still answers at the TCP layer. Captures taken before this
+was recorded report `handshake=None` and are downgraded to "probably" rather
+than guessed at.
+
 ### Continuous monitoring
 
 Filtering behaviour changes faster than a single measurement stays true, so one

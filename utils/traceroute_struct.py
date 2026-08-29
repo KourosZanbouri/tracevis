@@ -65,7 +65,8 @@ class traceroute_data:
         self.reply_forged = reply_forged
         self.forgery_evidence = forgery_evidence
 
-    def add_hop(self, hop, from_ip, rtt, size, ttl, answer_summary, answered, unanswered, rst_count=0, dport=None):
+    def add_hop(self, hop, from_ip, rtt, size, ttl, answer_summary, answered,
+                unanswered, rst_count=0, dport=None, handshake=None):
         if len(self.result) < hop:
             (self.result).append({"hop": hop, "result": []})
         if rtt == 0:
@@ -88,6 +89,16 @@ class traceroute_data:
                 star_result["rst_count"] = rst_count
             if answer_summary and answer_summary != "*":
                 star_result["note"] = answer_summary
+            # Backlog §2.10. This is the star that matters: the data probe got
+            # nothing back, and the question is whether it was dropped on the
+            # path or the destination simply declined to answer that payload.
+            # The handshake runs to the destination without a TTL limit, so a
+            # SYN-ACK is proof the destination was reachable at the TCP layer
+            # at that moment -- which separates the two. Only failure was ever
+            # recorded, and only as free text, so a silent hop could not be
+            # told apart from an unreachable one after the fact.
+            if handshake is not None:
+                star_result["handshake"] = bool(handshake)
             self.result[hop - 1]["result"].append(star_result)
         else:
             packetlist = utils.convert_packetlist.packetlist2json(
@@ -105,6 +116,8 @@ class traceroute_data:
             # can rotate mid-trace, so record what this probe actually used.
             if dport is not None:
                 hop_result["dport"] = dport
+            if handshake is not None:
+                hop_result["handshake"] = bool(handshake)
             self.result[hop - 1]["result"].append(hop_result)
 
     def set_endtime(self, endtime):

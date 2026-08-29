@@ -535,14 +535,68 @@ class TestHandshakeAnswerIsNotAlwaysSynAck(TraceTestCase):
         self.assertIn("dest-unreach", first["note"])
         self.assertIn("10.10.34.34", first["note"])
 
-    def test_a_plain_timeout_still_serialises_without_a_note(self):
-        """The new keys are additive: a hop that simply never answered has to
-        serialise exactly as it did before."""
+    def test_a_plain_timeout_carries_only_the_handshake_verdict(self):
+        """A silent hop stays minimal apart from the handshake outcome.
+
+        This assertion used to be `["packets", "x"]`. Backlog §2.10 changed
+        the contract deliberately: on a probe that *did* attempt a handshake,
+        whether that handshake succeeded is the difference between "the path
+        dropped this payload" and "the destination was never reachable", and
+        a star hop is exactly where that question is asked. The rest of the
+        minimality contract still holds, and `test_a_probe_without_a_handshake
+        _records_nothing` pins the half that matters most -- a trace that
+        never attempts a handshake serialises as it always did.
+        """
         net = FakeNetwork()
         self.run_trace(net, ip_list=["1.1.1.1"],
                        request_packet_1=self.data_packet(), do_tcph1=True,
                        max_ttl=2, continue_to_max_ttl=True)
-        self.assertEqual(sorted(self.hops()[0]["result"][0]), ["packets", "x"])
+        self.assertEqual(sorted(self.hops()[0]["result"][0]),
+                         ["handshake", "packets", "x"])
+        self.assertFalse(self.hops()[0]["result"][0]["handshake"])
+
+    def test_a_reachable_destination_with_a_silent_data_probe(self):
+        """Backlog §2.10, the case the samples could not previously settle.
+
+        The handshake goes to the destination without a TTL limit, so a
+        SYN-ACK proves the destination was reachable at the TCP layer at that
+        moment. A data probe that then gets nothing back was dropped on the
+        path -- it is not "the server declined the payload", because a server
+        that dislikes a payload still answers at the TCP layer. Recording the
+        SYN-ACK is what lets a capture carry that argument; before, only
+        failure was recorded, and only as free text.
+        """
+        def syn_acked_but_data_silent(packet):
+            if packet.haslayer(TCP) and str(packet[TCP].flags) == "S":
+                return IP(src=packet[IP].dst, ttl=50) / TCP(
+                    sport=packet[TCP].dport, dport=packet[TCP].sport,
+                    flags="SA", seq=1000, ack=packet[TCP].seq + 1,
+                    options=[("Timestamp", (5, packet[TCP].options[2][1][0]))])
+            return None
+
+        net = FakeNetwork(rule=syn_acked_but_data_silent)
+        self.run_trace(net, ip_list=["1.1.1.1"],
+                       request_packet_1=self.data_packet(), do_tcph1=True,
+                       max_ttl=2, continue_to_max_ttl=True)
+        for hop in self.hops():
+            reply = hop["result"][0]
+            self.assertEqual(reply.get("x"), "*", "the data probe must be silent")
+            self.assertTrue(reply["handshake"],
+                            "the destination answered the SYN, so this hop's "
+                            "silence is a dropped payload, not an unreachable host")
+
+    def test_a_probe_without_a_handshake_records_nothing(self):
+        """No handshake attempted means no handshake key: absent, not False.
+
+        "It failed" and "it was never tried" are different findings, and a
+        UDP or bare-TCP trace must serialise exactly as it did before §2.10.
+        """
+        net = FakeNetwork()
+        self.run_trace(net, ip_list=["1.1.1.1"],
+                       request_packet_1=self.data_packet(), do_tcph1=False,
+                       max_ttl=2, continue_to_max_ttl=True)
+        for hop in self.hops()[0]["result"]:
+            self.assertNotIn("handshake", hop)
 
     def test_an_injected_rst_on_the_syn_is_counted_not_swallowed(self):
         """A refused handshake never reaches the
