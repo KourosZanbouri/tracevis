@@ -1,4 +1,5 @@
 import json
+import pathlib
 import time
 import unittest
 from unittest import mock
@@ -472,6 +473,44 @@ class TestRunGeolocate(unittest.TestCase):
         self.assertNotIn("<locals>", geolocate._get_meta.__qualname__)
         import pickle
         pickle.dumps(geolocate._get_meta)  # module-level funcs pickle by name
+
+
+class TestVersionConsistency(unittest.TestCase):
+    """`VERSION` is the project's single source of truth for its version.
+
+    Nothing asserted it before, so a release could bump the constant and
+    forget the changelog (or the reverse) and every test would still pass.
+    """
+
+    def test_version_is_semver(self):
+        self.assertRegex(geolocate.VERSION, r"^\d+\.\d+\.\d+$")
+
+    def test_user_agent_interpolates_the_version(self):
+        # A literal in USER_AGENT would silently keep reporting the old
+        # version to every metadata provider after a bump.
+        self.assertIn(geolocate.VERSION, geolocate.USER_AGENT)
+        self.assertEqual(
+            geolocate.USER_AGENT,
+            f"TraceVis/{geolocate.VERSION} (WikiCensorship)")
+
+    def test_changelog_documents_the_current_version(self):
+        changelog = pathlib.Path(__file__).resolve().parent.parent / "CHANGELOG.md"
+        text = changelog.read_text(encoding="utf-8")
+        self.assertIn(f"## [{geolocate.VERSION}]", text)
+
+    def test_version_constant_is_not_duplicated_in_source(self):
+        # The bump is one line precisely because no other module hardcodes it.
+        root = pathlib.Path(__file__).resolve().parent.parent
+        offenders = []
+        for path in (root / "utils").glob("*.py"):
+            if path.name == "geolocate.py":
+                continue
+            if geolocate.VERSION in path.read_text(encoding="utf-8"):
+                offenders.append(path.name)
+        tracevis = root / "tracevis.py"
+        if geolocate.VERSION in tracevis.read_text(encoding="utf-8"):
+            offenders.append(tracevis.name)
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

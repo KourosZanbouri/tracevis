@@ -5,6 +5,8 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-08-29
+
 ### Added (GitHub issue #44 — reverse-path detection via VP convergence)
 - **`_find_vp_convergence()` in `utils/vis.py`** detects the shared last-mile
   segment across multiple VP traces. Measurements are grouped by destination,
