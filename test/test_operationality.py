@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 
 import tracevis
@@ -224,6 +225,64 @@ class TestArguments(unittest.TestCase):
         args = tracevis.get_args([], auto_exit=False)
         self.assertIsNone(args.get("ioda_country"))
         sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+
+
+class TestIpv4Enforcement(unittest.TestCase):
+    """GitHub issue #69: --ipv4 parsed but was never read by anything.
+
+    The only consumer of the parsed value in the whole codebase was a test
+    asserting argparse had stored it, which proves argparse works, not that
+    the flag does anything.
+    """
+
+    def test_all_ipv4_targets_accepted(self):
+        self.assertEqual(
+            tracevis.reject_non_ipv4_targets(["1.1.1.1", "8.8.8.8"]), [])
+
+    def test_ipv6_literal_rejected(self):
+        self.assertEqual(
+            tracevis.reject_non_ipv4_targets(
+                ["1.1.1.1", "2001:4860:4860::8888"]),
+            ["2001:4860:4860::8888"])
+
+    def test_hostname_rejected(self):
+        self.assertEqual(
+            tracevis.reject_non_ipv4_targets(["example.com"]), ["example.com"])
+
+    def test_empty_target_list(self):
+        self.assertEqual(tracevis.reject_non_ipv4_targets([]), [])
+
+    def test_surrounding_whitespace_tolerated(self):
+        self.assertEqual(tracevis.reject_non_ipv4_targets([" 1.1.1.1 "]), [])
+
+    def test_every_offender_is_named(self):
+        rejected = tracevis.reject_non_ipv4_targets(
+            ["::1", "1.1.1.1", "nope", "2001:db8::1"])
+        self.assertEqual(rejected, ["::1", "nope", "2001:db8::1"])
+
+    def test_flag_is_consumed_by_main(self):
+        """The point of the fix: main() reads args["ipv4"] and acts on it."""
+        import inspect
+        source = inspect.getsource(tracevis.main)
+        self.assertIn('args.get("ipv4")', source)
+        self.assertIn("reject_non_ipv4_targets", source)
+
+
+class TestIpv4ExitsBeforeProbing(unittest.TestCase):
+    """A rejected target must stop the run, not fail later inside scapy."""
+
+    def test_exits_nonzero_with_an_ipv6_target(self):
+        import os
+        import subprocess
+        env = dict(os.environ, TRACEVIS_OUTPUT_DIR=tempfile.mkdtemp())
+        proc = subprocess.run(
+            [sys.executable, "tracevis.py", "--dns", "--ipv4",
+             "-i", "1.1.1.1,2001:4860:4860::8888"],
+            capture_output=True, text=True, env=env, check=False,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("2001:4860:4860::8888", proc.stdout + proc.stderr)
+        self.assertIn("not IPv4", proc.stdout + proc.stderr)
 
 
 if __name__ == "__main__":

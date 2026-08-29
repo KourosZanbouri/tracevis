@@ -1152,3 +1152,222 @@ class TestEdgeHighlightScript(VisFixtureMixin, unittest.TestCase):
     def test_not_injected_without_the_flag(self):
         page = self.render([make_measurement()], edge_lable="none")
         self.assertNotIn("highlightPathToEdge", page)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the review of the §2.2 / §2.3 / #68 / #69 work.
+# ---------------------------------------------------------------------------
+
+
+class TestRequestColorIndexing(unittest.TestCase):
+    """Indexing REQUEST_COLORS by measurement number crashed past the twelfth.
+
+    Not a corner case for --vps: utils.ripe_atlas.MEASUREMENT_IDS holds nine
+    ids and download_multi_from_atlas loops probes x ids, so two probes can
+    produce eighteen measurements. The render died with an IndexError after the
+    download had already been saved.
+    """
+
+    def _measurements(self, count, vps=None):
+        out = []
+        for i in range(count):
+            m = {"dst_addr": "1.1.1.1", "src_addr": f"10.0.{i}.1"}
+            if vps:
+                m["vp"] = vps[i % len(vps)]
+            out.append(m)
+        return out
+
+    def test_thirteen_measurements_does_not_raise(self):
+        colors = utils.vis.build_request_colors(self._measurements(13))
+        self.assertEqual(len(colors), 13)
+
+    def test_wraps_well_past_the_palette(self):
+        colors = utils.vis.build_request_colors(self._measurements(100))
+        self.assertEqual(len(colors), 100)
+        self.assertTrue(set(colors) <= set(utils.vis.REQUEST_COLORS))
+
+    def test_eighteen_measurements_render(self):
+        """Two RIPE Atlas probes x the nine default measurement ids."""
+        directory = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: [os.remove(os.path.join(directory, n))
+                     for n in os.listdir(directory)] and None
+            or os.rmdir(directory))
+        path = os.path.join(directory, "m.json")
+        measurements = []
+        for vp in ("1", "2"):
+            for i in range(9):
+                m = make_measurement(vp=vp, dst_addr=f"9.9.9.{i + 1}")
+                m["src_addr"] = f"192.168.{vp}.10"
+                m["vp"] = vp
+                measurements.append(m)
+        with open(path, "w") as handle:
+            json.dump(measurements, handle)
+        with redirect_stdout(io.StringIO()):
+            utils.vis.vis(measurement_path=path, attach_jscss=False,
+                          edge_lable="none")
+        self.assertGreater(utils.vis.multi_directed_graph.number_of_edges(), 0)
+
+
+class TestPerVpColouring(unittest.TestCase):
+    """"per-VP colour-coded edges" was per-*measurement* colouring.
+
+    With the accessible/blocked destination pair tracevis exists to compare,
+    one vantage point got two different colours and no colour identified a VP.
+    """
+
+    def _capture(self):
+        out = []
+        for vp in ("1", "2"):
+            for dst in ("8.8.4.4", "8.8.8.8"):
+                out.append({"vp": vp, "dst_addr": dst,
+                            "src_addr": f"192.168.{vp}.10"})
+        return out
+
+    def test_one_colour_per_vantage_point(self):
+        capture = self._capture()
+        colors = utils.vis.build_request_colors(capture)
+        by_vp = {}
+        for measurement, color in zip(capture, colors):
+            by_vp.setdefault(measurement["vp"], set()).add(color)
+        for vp, used in by_vp.items():
+            self.assertEqual(len(used), 1, f"VP {vp} used {used}")
+
+    def test_colours_differ_between_vantage_points(self):
+        capture = self._capture()
+        colors = utils.vis.build_request_colors(capture)
+        first = {m["vp"]: c for m, c in zip(capture, colors)}
+        self.assertNotEqual(first["1"], first["2"])
+
+    def test_falls_back_to_per_measurement_without_vps(self):
+        capture = [{"dst_addr": "1.1.1.1"}, {"dst_addr": "8.8.8.8"}]
+        colors = utils.vis.build_request_colors(capture)
+        self.assertEqual(colors, utils.vis.REQUEST_COLORS[:2])
+
+    def test_more_vps_than_palette_entries_wrap(self):
+        capture = [{"vp": str(i), "dst_addr": "1.1.1.1"} for i in range(30)]
+        colors = utils.vis.build_request_colors(capture)
+        self.assertEqual(len(colors), 30)
+
+
+class TestSourceNodeIdentity(unittest.TestCase):
+    """VP 1's source node was anonymous, and colliding VPs merged."""
+
+    def test_vp_is_part_of_the_node_id(self):
+        self.assertNotEqual(
+            utils.vis.source_node_id("192.168.1.10", "1"),
+            utils.vis.source_node_id("192.168.1.10", "2"))
+
+    def test_no_vp_keeps_the_plain_numeric_id(self):
+        self.assertEqual(utils.vis.source_node_id("1.1.1.1"),
+                         utils.vis.source_node_id("1.1.1.1", None))
+
+
+class TestSourceNodeLabelling(VisFixtureMixin, unittest.TestCase):
+    """The seed node claimed the id before the loop could label VP 1."""
+
+    def _sources(self, measurements):
+        self.render(measurements, edge_lable="none")
+        return sorted(
+            (data["label"], data["title"])
+            for _, data in utils.vis.multi_directed_graph.nodes(data=True)
+            if data.get("shape") == "diamond")
+
+    def _vp(self, vp, src):
+        m = make_measurement(vp=vp)
+        m["src_addr"] = src
+        m["vp"] = vp
+        return m
+
+    def test_first_vp_is_labelled_too(self):
+        sources = self._sources([self._vp("1", "192.168.178.26"),
+                                 self._vp("2", "192.168.254.43")])
+        titles = [title for _, title in sources]
+        self.assertIn("source (VP 1)", titles)
+        self.assertIn("source (VP 2)", titles)
+        self.assertNotIn("source address", titles)
+
+    def test_probes_sharing_a_private_address_stay_separate(self):
+        """RIPE Atlas probes report RFC 1918 addresses; collisions happen."""
+        sources = self._sources([self._vp("1", "192.168.1.10"),
+                                 self._vp("2", "192.168.1.10")])
+        self.assertEqual(len(sources), 2)
+        self.assertEqual([t for _, t in sources],
+                         ["source (VP 1)", "source (VP 2)"])
+
+    def test_single_measurement_without_vp_is_unchanged(self):
+        sources = self._sources([make_measurement()])
+        self.assertEqual([t for _, t in sources], ["source address"])
+
+
+class TestAllowlistBoundaryLabel(VisFixtureMixin, unittest.TestCase):
+    """The boundary marker was suppressed by the default --label.
+
+    The guard was `not current_edge_label`, and --label backttl (the default)
+    always sets one, so the annotation only ever appeared under --label none.
+    """
+
+    def _boundary_labels(self, edge_lable):
+        measurement = make_measurement(network_state="allowlisted",
+                                       cgnat_hop=True)
+        self.render([measurement], edge_lable=edge_lable)
+        return [data.get("label") or ""
+                for _, _, data in utils.vis.multi_directed_graph.edges(data=True)
+                if "allowlisted tier" in (data.get("label") or "")]
+
+    def test_visible_with_the_default_label(self):
+        self.assertTrue(self._boundary_labels("backttl"))
+
+    def test_visible_with_rtt_labels(self):
+        self.assertTrue(self._boundary_labels("rtt"))
+
+    def test_visible_with_no_labels(self):
+        self.assertEqual(self._boundary_labels("none"), ["→ allowlisted tier"])
+
+    def test_backttl_value_is_kept_alongside_the_marker(self):
+        """Appending, not replacing — the hop's backttl must survive."""
+        for label in self._boundary_labels("backttl"):
+            self.assertRegex(label, r"^\S+ → allowlisted tier$")
+
+
+class TestPhaseOverlayIsDataDriven(unittest.TestCase):
+    """The legend announced a CGNAT boundary on graphs holding no CGNAT node."""
+
+    def test_reports_absence(self):
+        html = utils.vis._inject_phase_overlay("<body></body>", cgnat_nodes=0)
+        self.assertIn("no CGNAT boundary on this path", html)
+
+    def test_reports_one(self):
+        html = utils.vis._inject_phase_overlay("<body></body>", cgnat_nodes=1)
+        self.assertIn("1 teal hex", html)
+
+    def test_reports_several(self):
+        html = utils.vis._inject_phase_overlay("<body></body>", cgnat_nodes=4)
+        self.assertIn("4 teal hexes", html)
+
+    def test_unknown_count_keeps_the_generic_caption(self):
+        html = utils.vis._inject_phase_overlay("<body></body>")
+        self.assertIn("teal hex = CGNAT boundary", html)
+
+    def test_count_matches_the_graph(self):
+        graph = utils.vis.nx.MultiDiGraph()
+        graph.add_node("a", color=utils.vis.CGNAT_COLOR)
+        graph.add_node("b", color="green")
+        graph.add_node("c", color=utils.vis.CGNAT_COLOR)
+        self.assertEqual(utils.vis.count_cgnat_nodes(graph), 2)
+
+
+class TestPhaseOverlayEndToEnd(VisFixtureMixin, unittest.TestCase):
+    def test_no_cgnat_hop_says_so(self):
+        page = self.render([make_measurement(cgnat_hop=False, hops=[
+            {"from": "192.168.1.1", "rtt": 1.0, "size": 56, "ttl": 64,
+             "summary": "x", "rst_count": 0},
+            {"from": "8.8.8.8", "rtt": 3.0, "size": 56, "ttl": 254,
+             "summary": "x", "rst_count": 0}])],
+            phase_overlay=True, edge_lable="none")
+        self.assertIn("no CGNAT boundary on this path", page)
+
+    def test_cgnat_hop_is_counted(self):
+        page = self.render([make_measurement(cgnat_hop=True)],
+                           phase_overlay=True, edge_lable="none")
+        self.assertIn("1 teal hex", page)

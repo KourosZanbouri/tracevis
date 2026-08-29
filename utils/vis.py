@@ -657,7 +657,14 @@ def save_measurement_graph(graph_name, attach_jscss, phase_overlay=False,
     print("saved: " + graph_path)
 
 
-def _inject_phase_overlay(html_content):
+def count_cgnat_nodes(graph=None):
+    """How many CGNAT (allowlist-boundary) nodes the rendered graph holds."""
+    graph = multi_directed_graph if graph is None else graph
+    return sum(1 for _, data in graph.nodes(data=True)
+               if data.get("color") == CGNAT_COLOR)
+
+
+def _inject_phase_overlay(html_content, cgnat_nodes=None):
     """Backlog §2.4: inject a phase/tier overlay legend into the rendered graph.
 
     vis.js positions nodes dynamically at render time, so a CSS band cannot be
@@ -665,7 +672,20 @@ def _inject_phase_overlay(html_content):
     coloured box with explanatory text that appears in the graph corner,
     telling the operator that teal hexagon nodes mark the allowlisted tier
     boundary.
+
+    ``cgnat_nodes`` is how many CGNAT hops the graph actually contains. The
+    legend used to be a fixed caption, so it announced "teal hex = CGNAT
+    boundary" over graphs holding no teal hexagon at all. It now says what was
+    found, and says so plainly when the answer is nothing.
     """
+    if cgnat_nodes is None:
+        caption = "(teal hex = CGNAT boundary)"
+    elif cgnat_nodes == 0:
+        caption = "(no CGNAT boundary on this path)"
+    elif cgnat_nodes == 1:
+        caption = "(1 teal hex = CGNAT boundary)"
+    else:
+        caption = f"({cgnat_nodes} teal hexes = CGNAT boundary)"
     overlay_html = (
         '<div id="phase-overlay" style="'
         'position:fixed;top:30px;right:20px;'
@@ -675,7 +695,7 @@ def _inject_phase_overlay(html_content):
         'font-size:12px;font-family:sans-serif;'
         'border:2px solid #20b2aa;z-index:1000;">'
         'Allowlisted tier<br/>'
-        '<span style="font-size:10px;">(teal hex = CGNAT boundary)</span>'
+        '<span style="font-size:10px;">' + html.escape(caption) + '</span>'
         '</div>'
     )
     insertion_point = html_content.find("</body>")
@@ -831,6 +851,54 @@ def needs_offline_assets(measurements):
     return bool(observed_censored_states(measurements))
 
 
+def source_node_id(src_addr, vp_id=None):
+    """Graph node id for a vantage point's source address.
+
+    The id carries the VP when one is known, because RIPE Atlas probes report
+    their *private* address (the sample capture has 192.168.178.26 and
+    192.168.254.43). Two probes on different LANs can easily report the same
+    RFC 1918 address, and keying the node on the address alone silently merged
+    them into one source with no way to tell them apart.
+    """
+    numeric = 'x' + str(int(ipaddress.IPv4Address(src_addr))) + 'x'
+    if vp_id:
+        return numeric + "vp" + str(vp_id)
+    return numeric
+
+
+def build_request_colors(all_measurements):
+    """Return a per-measurement colour list, keyed by vantage point when present.
+
+    Two problems this fixes.
+
+    Indexing ``REQUEST_COLORS`` directly by measurement number raised
+    ``IndexError`` past the twelfth measurement. That is not a corner case for
+    ``--vps``: ``utils.ripe_atlas.MEASUREMENT_IDS`` holds nine measurement ids
+    and ``download_multi_from_atlas`` loops probes x ids, so **two probes can
+    produce eighteen measurements** and the render died with a traceback after
+    the download had already been saved. The index now wraps.
+
+    The colour also did not mean what ``--vps`` advertised. It was assigned per
+    measurement, so with the accessible/blocked destination pair that tracevis
+    exists to compare, one vantage point got two different colours and no
+    colour identified a VP. When any measurement carries a ``vp``, colour is
+    assigned per distinct VP instead, which is what "per-VP colour-coded edges"
+    was supposed to mean. Without VPs the per-measurement behaviour is kept.
+    """
+    identities = [m.get("vp") for m in all_measurements]
+    if any(identities):
+        order = []
+        for vp_id in identities:
+            key = vp_id if vp_id else None
+            if key not in order:
+                order.append(key)
+        return [REQUEST_COLORS[order.index(vp if vp else None)
+                               % len(REQUEST_COLORS)]
+                for vp in identities]
+    return [REQUEST_COLORS[i % len(REQUEST_COLORS)]
+            for i in range(len(all_measurements))]
+
+
 def vis(measurement_path, attach_jscss, edge_lable: str = "none",
         phase_overlay: bool = False, highlight_selected: bool = False,
         renderer="visjs", reverse_path=False):
@@ -850,15 +918,13 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
     measurement_steps = 0
     src_addr = all_measurements[0]["src_addr"]
     src_addr = resolve_or_ip(src_addr)
-    src_addr_id = 'x' + str(int(ipaddress.IPv4Address(src_addr))) + 'x'
-    multi_directed_graph.add_node(
-        src_addr_id, label=src_addr, color="Chocolate", title="source address",
-        shape="diamond")
+    # Colour is assigned per vantage point when the capture has any, and per
+    # measurement otherwise. See build_request_colors() for why.
+    request_colors = build_request_colors(all_measurements)
     for measurement in all_measurements:
         curr_src_addr = measurement.get("src_addr", src_addr)
         curr_src_addr = resolve_or_ip(curr_src_addr)
-        curr_src_id = 'x' + str(
-            int(ipaddress.IPv4Address(curr_src_addr))) + 'x'
+        curr_src_id = source_node_id(curr_src_addr, measurement.get("vp"))
         if curr_src_id not in multi_directed_graph:
             vp_label = "source address"
             vp_id = measurement.get("vp")
@@ -1096,12 +1162,20 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
                                     current_node_shape = "square"
                                     # Backlog §2.4: phase/tier overlay annotation on
                                 # the edge that crosses into the allowlisted tier.
-                                if is_allowlist_boundary and not current_edge_label:
-                                    current_edge_label = "→ allowlisted tier"
+                                # Append rather than replace. The guard used
+                                # to be `not current_edge_label`, and the
+                                # default --label backttl always sets one, so
+                                # the boundary marker was invisible in normal
+                                # use -- it only appeared under --label none.
+                                if is_allowlist_boundary:
+                                    current_edge_label = (
+                                        f"{current_edge_label} → allowlisted tier"
+                                        if current_edge_label
+                                        else "→ allowlisted tier")
                     repeat_step_str = str(repeat_steps + 1)
                     current_edge_title = styled_tooltips(
                         current_request_color=(
-                            REQUEST_COLORS[measurement_steps]),
+                            request_colors[measurement_steps]),
                         current_ttl_str=current_ttl_str, backttl=str(backttl),
                         request_ip=dst_addr, elapsed_ms=elapsed_ms,
                         packet_size=packet_size, repeat_step=repeat_step_str,
@@ -1111,7 +1185,7 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
                     visualize(
                         previous_node_ids[repeat_steps], current_node_id,
                         current_node_label, device_name, device_color,
-                        current_edge_title, REQUEST_COLORS[measurement_steps],
+                        current_edge_title, request_colors[measurement_steps],
                         current_edge_label, current_node_shape
                     )
                     previous_node_ids[repeat_steps] = current_node_id

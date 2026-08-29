@@ -76,6 +76,7 @@ class VisJsRenderer(Renderer):
             _inject_edge_highlight,
             _inject_phase_overlay,
             _inject_reverse_path_legend,
+            count_cgnat_nodes,
         )
 
         # GitHub issue #44: mark edges whose destination node is in the
@@ -111,7 +112,8 @@ class VisJsRenderer(Renderer):
         graph_path = graph_name + ".html"
         html_content = net_vis.generate_html()
         if phase_overlay:
-            html_content = _inject_phase_overlay(html_content)
+            html_content = _inject_phase_overlay(
+                html_content, cgnat_nodes=count_cgnat_nodes(graph))
         if highlight_selected:
             html_content = _inject_edge_highlight(html_content)
         # Only label the graph when at least one edge actually carries the
@@ -187,6 +189,7 @@ class PlotlyRenderer(Renderer):
         from utils.vis import (
             _inject_phase_overlay,
             _inject_reverse_path_legend,
+            count_cgnat_nodes,
         )
 
         pos = self._layered_layout(graph)
@@ -230,7 +233,8 @@ class PlotlyRenderer(Renderer):
         )
 
         if phase_overlay:
-            html = _inject_phase_overlay(html)
+            html = _inject_phase_overlay(
+                html, cgnat_nodes=count_cgnat_nodes(graph))
         if reverse_path and reverse_path_ips:
             html = _inject_reverse_path_legend(html)
 

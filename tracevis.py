@@ -2,6 +2,7 @@
 from __future__ import absolute_import, unicode_literals
 
 import argparse
+import ipaddress
 import json
 import os
 import platform
@@ -34,6 +35,29 @@ OS_NAME = platform.system()
 # an arbitrary port instead. `--sni-test` and the packet samples are the
 # 443-shaped probes the port pool exists for.
 PORT_BOUND_MODES = ("dns", "dnstcp", "dnsdot", "dnstt")
+
+
+def reject_non_ipv4_targets(request_ips):
+    """Return the targets that are not IPv4 addresses (GitHub issue #69).
+
+    tracevis probes IPv4 only — `utils/ephemeral_port.py` binds `AF_INET`,
+    `utils/traceroute_struct.py` fixes `af=4`, `utils/vis.py` parses every hop
+    as `IPv4Address` and `utils/packet_input.py` rejects non-IPv4 packets. But
+    nothing validated the target list, so an IPv6 literal passed to `-i` was
+    accepted here and failed later inside scapy or the renderer, well away from
+    the thing that caused it.
+
+    `--ipv4` is therefore an explicit, checked assertion of what the tool
+    already does, and this is what makes the flag act rather than merely parse:
+    a target that is not IPv4 is named and the run stops before probing.
+    """
+    rejected = []
+    for target in request_ips:
+        try:
+            ipaddress.IPv4Address(str(target).strip())
+        except (ipaddress.AddressValueError, ValueError):
+            rejected.append(str(target))
+    return rejected
 
 
 def use_default_targets(default_resolvers):
@@ -151,7 +175,8 @@ def get_args(sys_args, auto_exit=True):
     parser.add_argument('-V', '--vps', type=str,
                         help="comma-separated RIPE Atlas probe IDs for multi-VP download (§2.2). "
                              "Downloads the same measurement from each probe and renders "
-                             "them in one combined graph with per-VP colour-coded edges.")
+                             "them in one combined graph, one edge colour per vantage "
+                             "point.")
     parser.add_argument('--ioda-country', dest='ioda_country', type=str,
                         default=None,
                         help="cross-check a RIPE Atlas VP against IODA outage status "
@@ -231,8 +256,10 @@ def get_args(sys_args, auto_exit=True):
                         "same destination from 2+ vantage points, via --vps "
                         "or several -f files)")
     parser.add_argument('--ipv4', dest='ipv4', action='store_true',
-                        help="force IPv4-only probing and socket binding "
-                             "(GitHub issue #69)")
+                        help="require every probe target to be IPv4, and stop "
+                             "before probing if one is not. tracevis is "
+                             "IPv4-only throughout; this makes that explicit "
+                             "and checked (GitHub issue #69)")
     # this argument ('-o', '--options') will be changed or removed before v1.0.0
     parser.add_argument('-o', '--options', type=str, default="new",
                         help=""" (this argument will be changed or removed before v1.0.0)
@@ -429,6 +456,14 @@ def main(args):
             name_prefix += "-tcph"
     if trace_with_retransmission:
         name_prefix += "-paristr"
+    if args.get("ipv4"):
+        rejected = reject_non_ipv4_targets(request_ips)
+        if rejected:
+            print("Error!\n--ipv4 was requested but these targets are not "
+                  "IPv4 addresses: " + ", ".join(rejected))
+            sys.exit(1)
+        print("· · · - · --ipv4: " + str(len(request_ips))
+              + " target(s) confirmed IPv4")
     if do_traceroute:
         try:
             if args.get("packet") or args.get("rexmit"):
@@ -477,6 +512,17 @@ def main(args):
                       f"available={status['available']} "
                       f"outage={status['outage']} "
                       f"value={status['latest_value']}")
+                # Write it into the capture as well. Printing alone left the
+                # cross-check invisible in the graph: utils.vis reads
+                # measurement["ioda_status"] and nothing ever set it.
+                annotated = utils.ioda.annotate_measurements(
+                    measurement_path, status)
+                if annotated:
+                    print(f"· · · - · IODA[{status['country']}] recorded on "
+                          f"{annotated} measurement(s)")
+                elif status.get("error"):
+                    print("· · · - · IODA unavailable, not recorded: "
+                          + str(status["error"]))
             except Exception as e:
                 print(f"IODA fetch failed: {e}")
     if args.get("ripe"):

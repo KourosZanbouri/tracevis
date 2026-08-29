@@ -127,3 +127,45 @@ def _coerce_float(v):
     if isinstance(v, (int, float)):
         return v
     return 0.0
+
+
+def annotate_measurements(measurement_path, status):
+    """Write an IODA status onto every measurement in a saved capture.
+
+    ``utils.vis.vis()`` reads ``measurement["ioda_status"]`` and renders it into
+    the hop tooltip as ``IODA[CC]: outage (value=...)``. Nothing wrote that key:
+    ``tracevis.py`` fetched the status and printed it to the terminal, so the
+    cross-check never reached the graph and no saved capture carried it. This
+    closes that gap.
+
+    Returns the number of measurements annotated, or 0 when the status is
+    unusable or the file cannot be rewritten — the annotation is a nice-to-have
+    on top of a download that already succeeded, so a failure here must not
+    lose the measurement.
+    """
+    if not status or not status.get("available"):
+        return 0
+    try:
+        with open(measurement_path, encoding="utf-8") as handle:
+            measurements = json.load(handle)
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(measurements, list):
+        return 0
+    annotation = {
+        "country": status.get("country", ""),
+        "outage": bool(status.get("outage")),
+        "latest_value": status.get("latest_value", 0.0),
+        "latest_date": status.get("latest_date"),
+    }
+    count = 0
+    for measurement in measurements:
+        if isinstance(measurement, dict):
+            measurement["ioda_status"] = dict(annotation)
+            count += 1
+    try:
+        with open(measurement_path, "w", encoding="utf-8") as handle:
+            json.dump(measurements, handle)
+    except OSError:
+        return 0
+    return count

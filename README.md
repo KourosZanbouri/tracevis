@@ -234,6 +234,24 @@ the port it actually probed (`dport`, which matters once RST rotation moves it),
 its `rst_count`, and — when a TCP handshake was refused rather than ignored — a
 `note` saying what answered instead.
 
+## IPv4 only
+
+tracevis probes IPv4 end to end: `utils/ephemeral_port.py` binds `AF_INET`,
+`utils/traceroute_struct.py` fixes `af=4`, `utils/vis.py` parses every hop as an
+`IPv4Address`, and `utils/packet_input.py` rejects non-IPv4 packets. IPv6 is
+tracked as backlog §2.1.
+
+`--ipv4` makes that explicit and checked: every probe target must be an IPv4
+address, and the run stops before probing if one is not, naming the offender.
+Without it an IPv6 literal passed to `-i` is accepted and fails later inside
+scapy or the renderer, well away from what caused it.
+
+```sh
+$ python3 ./tracevis.py --dns --ipv4 -i 1.1.1.1,2001:4860:4860::8888
+Error!
+--ipv4 was requested but these targets are not IPv4 addresses: 2001:4860:4860::8888
+```
+
 ## Rendering the graph
 
 The graph is written next to the measurement JSON as an `.html` file. A few
@@ -252,7 +270,9 @@ flags change what it shows and how it is drawn.
   with `--vps`, or with several `-f` files combined. Matching edges are drawn
   dashed amber with a legend; with a single VP the run says there was nothing
   to mark and draws no legend.
-- `--phase-overlay` — allowlisted-tier overlay legend (backlog §2.4).
+- `--phase-overlay` — allowlisted-tier overlay legend (backlog §2.4). The
+  legend reports how many CGNAT boundary hops the graph actually contains, and
+  says so when there are none.
 - `-a` / `--attach` — embed the JS/CSS in the page instead of linking a CDN.
 
 ### Offline pages on censored networks
@@ -491,9 +511,16 @@ python3 ./tracevis.py --vps [probe-id1,probe-id2,...] -I [msm-id1,msm-id2,...] -
 ```
 
 `--vps` downloads the same measurement from each probe and renders them in one
-combined graph with per-VP colour-coded edges. `--ioda-country IR` (default)
-cross-checks IODA outage data and annotates VPs whose source is in an
-active-outage country.
+combined graph, **one edge colour per vantage point**, with each probe's source
+drawn as its own labelled diamond ("source (VP 1)", "source (VP 2)", …). Probes
+that report the same private address stay distinct.
+
+`--ioda-country IR` (default) fetches IODA's connectivity status for that
+country and records it on every measurement in the capture, so it shows up in
+the hop tooltip as `IODA[IR]: outage (value=…)`. It is a single country-level
+cross-check against the run as a whole — it does **not** geolocate individual
+probes, so it does not tell you which particular VP sits in an outage. If IODA
+is unreachable the download is unaffected and nothing is recorded.
 
 Add `--reverse-path` to mark the segment every probe traverses identically on
 its way to the destination:

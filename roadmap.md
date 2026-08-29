@@ -136,7 +136,8 @@ Five additional GitHub issues have been resolved on top of the roadmap:
 (reverse-path detection via VP convergence). All five were subsequently
 reviewed against the repository's own captures; see the "Fixed (review of the
 #2 / #44 / #47 / #64 / #75 work)" section of CHANGELOG.md for what that
-turned up and corrected.
+turned up and corrected. §2.2, §2.3 and issues #68/#69 were then reviewed the
+same way — see "Fixed (review of the §2.2 / §2.3 / #68 / #69 work)".
 
 ---
 

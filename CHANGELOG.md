@@ -62,6 +62,61 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
   rendered graph may link its JS/CSS from a CDN. That decision moved to
   `utils.vis.needs_offline_assets()`, which reads the recorded `network_state`.
 
+### Fixed (review of the §2.2 / §2.3 / #68 / #69 work)
+Found the same way as the review above: by exercising the shipped flags against
+this repository's own captures.
+
+- **`--vps` could not render two probes at all.** Edge colour was looked up as
+  `REQUEST_COLORS[measurement_steps]` against a 12-entry palette, so the
+  thirteenth measurement raised `IndexError` and the run ended in a traceback
+  *after* the download had been saved. `utils.ripe_atlas.MEASUREMENT_IDS` holds
+  nine measurement ids and `download_multi_from_atlas` loops probes x ids, so
+  **two probes produce up to eighteen measurements** — the documented primary
+  use case. The index now wraps, via `build_request_colors()`.
+- **Edge colour did not identify a vantage point**, though `--vps` help, the
+  README and the commit message all said it did. It was assigned per
+  measurement, so with the accessible/blocked destination pair tracevis exists
+  to compare, one VP got two colours and no colour mapped to a VP. Colour is
+  now assigned per distinct VP when the capture has any, falling back to
+  per-measurement otherwise.
+- **The first vantage point's source node was anonymous.** A seed node claimed
+  the id before the loop ran, and the loop's `if curr_src_id not in graph`
+  guard then never fired for it, so an N-VP graph showed "source (VP 2)" …
+  "source (VP N)" plus one unidentifiable "source address". The seed is gone
+  and every source node is labelled.
+- **Two probes reporting the same private address merged into one node.** RIPE
+  Atlas probes report RFC 1918 addresses (the sample capture has
+  192.168.178.26 and 192.168.254.43), so two probes on different LANs can
+  collide. `source_node_id()` now keys the node on the VP as well.
+- **The IODA cross-check never reached the graph.** `tracevis.py` fetched the
+  status and printed it to the terminal; nothing ever wrote
+  `measurement["ioda_status"]`, which is the key `utils/vis.py` reads to render
+  the `IODA[CC]: outage (value=...)` tooltip line. Zero saved captures carried
+  it, and the only thing that ever populated it was a test injecting the dict
+  by hand. New `utils.ioda.annotate_measurements()` writes the fetched status
+  into the capture, and degrades to a no-op (never losing the measurement) when
+  IODA is unreachable or the file cannot be rewritten.
+- **`--ipv4` (#69) did nothing.** The only read of the parsed value anywhere in
+  the codebase was a test asserting argparse had stored it. tracevis is IPv4-
+  only throughout, so there was no mode to switch; the flag is now an explicit,
+  checked assertion — `reject_non_ipv4_targets()` names any target that is not
+  an IPv4 address and the run stops before probing, instead of failing later
+  inside scapy or the renderer.
+- **The allowlist-boundary edge marker was invisible by default.** The guard
+  was `if is_allowlist_boundary and not current_edge_label`, and the default
+  `--label backttl` always sets a label, so "→ allowlisted tier" only appeared
+  under `--label none`. On a real allowlisted capture with a CGNAT hop: 6
+  markers with `--label none`, 0 with the default. It now appends, so the hop's
+  own label survives alongside it (`2 → allowlisted tier`).
+- **`--phase-overlay` was a fixed caption.** It announced "teal hex = CGNAT
+  boundary" over graphs containing no CGNAT node at all. It now reports what
+  the graph holds, including saying plainly when the answer is none.
+
+Verified working as documented, and left alone: CGNAT teal-hexagon rendering
+(checked against the 17 captures here that contain RFC 6598 hops),
+`resolve_or_ip()`'s hostname fix (#68), and RIPE Atlas data with no per-hop
+`packets` dict.
+
 ### Fixed (review of the #2 / #44 / #47 / #64 / #75 work)
 Each of these was found by exercising the new flags against this repository's
 own captures rather than by re-reading the code; the numbers below come from
