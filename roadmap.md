@@ -130,6 +130,14 @@ tint of allowlisted-tier nodes), 2.7 (`--monitor`), 2.1 (IPv6), 2.10 (needs a
 controlled endpoint), and 1.4 (needs rescope first). §2.2 (multi-VP + IODA)
 and §2.3 (CGNAT/allowlist node types + phase overlay) are shipped.
 
+Five additional GitHub issues have been resolved on top of the roadmap:
+#75 (DNS resolution race condition), #47 (middlebox fingerprinting),
+#2 (edge-click highlight), #64 (graphing backend abstraction), and #44
+(reverse-path detection via VP convergence). All five were subsequently
+reviewed against the repository's own captures; see the "Fixed (review of the
+#2 / #44 / #47 / #64 / #75 work)" section of CHANGELOG.md for what that
+turned up and corrected.
+
 ---
 
 ## Execution discipline

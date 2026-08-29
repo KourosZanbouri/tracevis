@@ -208,34 +208,62 @@ def is_reachability_differential(probes):
     return silent > (len(probes) - silent)
 
 
-def detect_dns_blackhole(probe_domain=BLACKHOLE_PROBE_DOMAIN, timeout=3):
-    """Return True if DNS resolves ``probe_domain`` into the blackhole net.
+class DnsResult:
+    """Result of a DNS blackhole probe.
 
-    Two things had to be true for this to fire and neither was: the domain has
-    to be one that is actually blocked (it was the accessible control), and the
-    answer has to be matched against the filter *net* rather than one literal
-    address (the observed answer was .35, the constant was .34).
+    ``blackholed`` preserves the historical bool return of
+    ``detect_dns_blackhole`` — a domain that resolved into the blackhole net.
+
+    ``resolved`` is the new signal for GitHub issue #75: True when
+    ``gethostbyname`` returned *any* answer at all, proving the network and
+    resolver are reachable. ``detect_dns_blackhole`` used to return False for
+    both "resolved cleanly" and "resolution failed", which collapsed two
+    distinct signals into one and masked a connectivity proof.
+
+    ``__bool__`` returns ``blackholed`` so existing callers that do
+    ``assertTrue(detect_dns_blackhole())`` keep working unchanged.
+    """
+
+    __slots__ = ("blackholed", "resolved")
+
+    def __init__(self, blackholed: bool, resolved: bool = False):
+        self.blackholed = blackholed
+        self.resolved = resolved
+
+    def __bool__(self):
+        return self.blackholed
+
+
+def detect_dns_blackhole(probe_domain=BLACKHOLE_PROBE_DOMAIN, timeout=3):
+    """Return :class:`DnsResult` indicating blackhole verdict and resolution.
+
+    ``DnsResult`` is bool-coercible to ``blackholed`` for backward
+    compatibility — ``assertTrue(detect_dns_blackhole())`` still checks the
+    blackhole verdict.
 
     Resolution runs in a worker thread with a bounded ``timeout`` so that a
     hijacked, unresponsive resolver on a high-latency path cannot stall the
-    whole measurement. A timeout resolves to False (do not
-    mistake an unresponsive resolver for a confirmed blackhole).
+    whole measurement.
     """
-    resolved = {"value": False}
+    resolved = {"value": None}
 
     def _resolve():
         try:
-            resolved["value"] = utils.dpi.is_blackhole_address(
-                socket.gethostbyname(probe_domain))
+            resolved["value"] = socket.gethostbyname(probe_domain)
         except OSError:
-            resolved["value"] = False
+            pass
 
     worker = Thread(target=_resolve, daemon=True)
     worker.start()
     worker.join(timeout)
     if worker.is_alive():
-        return False
-    return resolved["value"]
+        return DnsResult(False, False)
+    if resolved["value"] is not None:
+        return DnsResult(
+            utils.dpi.is_blackhole_address(resolved["value"]),
+            resolved=True,
+        )
+    return DnsResult(False, False)
 
 
 def classify_network_state(meta=None, dns_blackhole=False, probes=None):
@@ -288,15 +316,24 @@ def get_meta_vars():
     # classified even in a total shutdown rather than stalling
     # until the parent gives up with a stale 'unknown'.
     meta_box = {"value": None, "probes": []}
-    dns_box = {"value": False}
+    # dns_box stores the DnsResult from detect_dns_blackhole, which now carries
+    # both the blackhole verdict and whether DNS resolution succeeded. The
+    # resolution signal is what fixes GitHub issue #75: a successful DNS
+    # response (even into the blackhole) proves the network is up, independent
+    # of whether the metadata HTTP providers were reachable.
+    dns_box = {"result": None}
 
     def _fetch_meta():
         meta_box["value"], meta_box["probes"] = probe_providers(
             timeout=META_TIMEOUT)
 
     def _probe_dns():
-        dns_box["value"] = detect_dns_blackhole(timeout=DNS_TIMEOUT)
+        dns_box["result"] = detect_dns_blackhole(timeout=DNS_TIMEOUT)
 
+    # Both threads start before either join, so they run concurrently. The
+    # sequential joins below do NOT serialise them — they simply mean the
+    # main thread waits for meta first, then DNS. Both threads are racing the
+    # network coming up during this window.
     meta_thread = Thread(target=_fetch_meta, daemon=True)
     dns_thread = Thread(target=_probe_dns, daemon=True)
     meta_thread.start()
@@ -306,7 +343,11 @@ def get_meta_vars():
 
     user_meta = meta_box.get("value")
     probes = meta_box.get("probes") or []
-    dns_blackhole = dns_box.get("value", False)
+    dns_result = dns_box.get("result")
+    if dns_result is None:
+        dns_result = DnsResult(False, False)
+    dns_blackhole = dns_result.blackholed
+    dns_resolved = dns_result.resolved
     network_state = classify_network_state(user_meta, dns_blackhole, probes)
     provider_status = describe_probes(probes)
     if dns_blackhole:
@@ -322,8 +363,16 @@ def get_meta_vars():
               + " (" + str(len(probes) - len(silent)) + " of "
               + str(len(probes)) + " answered)")
 
-    if user_meta is not None:
+    # no_internet is only False when we have positive proof the network is up.
+    # A metadata provider answering proves connectivity. So does a successful
+    # DNS resolution — even into the blackhole, because gethostbyname returning
+    # any answer means the resolver is reachable and the network is not down.
+    # The old code checked only user_meta, so a run that started with no
+    # internet and came up just before the DNS probe still reported
+    # no_internet=True with stale placeholder metadata. GitHub issue #75.
+    if dns_resolved or user_meta is not None:
         no_internet = False
+    if user_meta is not None:
         if 'clientIp' in user_meta:
             public_ip = user_meta['clientIp']
             print("· · · - · " + public_ip)

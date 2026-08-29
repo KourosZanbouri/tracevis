@@ -46,6 +46,8 @@ class TestArguments(unittest.TestCase):
                     'csvraw': False, 'attach': False, 'label': None, 'domain1': None, 'domain2': None, 'annot1': None,
                     'annot2': None, 'rexmit': False, 'paris': False, 'options': 'new', 'iface': None, 'show_ifaces': False, 'port': None,
                      'port_pool': None, 'timeout_profile': None, 'network_mode': 'auto', 'phase_overlay': False,
+                     'highlight_selected': False, 'renderer': 'visjs',
+                     'reverse_path': False,
                      'ipv4': False, 'vps': None, 'ioda_country': None}
         self._assert_args_subset(args, expected)
         # new DNS-family flags default to off

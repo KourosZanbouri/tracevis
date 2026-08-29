@@ -234,6 +234,67 @@ the port it actually probed (`dport`, which matters once RST rotation moves it),
 its `rst_count`, and — when a TCP handshake was refused rather than ignored — a
 `note` saying what answered instead.
 
+## Rendering the graph
+
+The graph is written next to the measurement JSON as an `.html` file. A few
+flags change what it shows and how it is drawn.
+
+- `--renderer {visjs,plotly}` — graphing backend (GitHub issue #64). `visjs`
+  (default) is the pyvis/vis.js graph with the physics layout. `plotly` draws
+  the same data model — same node colours, shapes and tooltips — with Plotly.js
+  and a layered layout that puts hops in columns by distance from the source.
+- `--highlight-selected` — click an edge to highlight the whole upstream path
+  to it; click empty space to clear (GitHub issue #2). Where a node has several
+  parents (any multi-VP graph) the walk follows one of them.
+- `--reverse-path` — mark the segment every vantage point traverses identically
+  on its way to the destination (GitHub issue #44). Needs a measurement holding
+  the same destination from **two or more distinct vantage points**, so use it
+  with `--vps`, or with several `-f` files combined. Matching edges are drawn
+  dashed amber with a legend; with a single VP the run says there was nothing
+  to mark and draws no legend.
+- `--phase-overlay` — allowlisted-tier overlay legend (backlog §2.4).
+- `-a` / `--attach` — embed the JS/CSS in the page instead of linking a CDN.
+
+### Offline pages on censored networks
+
+The default vis.js template loads `vis.js` and `vis.css` from
+`cdnjs.cloudflare.com`. On the networks this tool exists to measure that host is
+often exactly what is unreachable, which would leave you holding a blank page.
+
+TraceVis embeds the assets automatically whenever the measurement records a
+`shutdown` or `allowlisted` `network_state`, so a graph taken on a censored
+network opens without any network access. `--attach` forces it regardless.
+
+The Plotly backend has no bundled copy of Plotly.js (it is ~3.5 MB, so it is
+not committed here). Drop one at `lib/plotly/plotly.min.js` and `--attach` will
+inline it; without it, `--renderer plotly` says it cannot produce a
+self-contained page and falls back to the CDN. `--renderer visjs` is the option
+that always works offline.
+
+## Middlebox fingerprinting
+
+Beyond the NAT/PEP/middlebox classification above, each hop is fingerprinted
+from the packets themselves (GitHub issue #47). The results appear in the hop
+tooltip.
+
+- **MSS clamping** — the reply advertises a smaller MSS than the probe did. The
+  tooltip reports the observed value and notes when it is one of the well-known
+  clamp values a middlebox typically rewrites to.
+- **TCP timestamp stripping** — the probe carried a Timestamp option and the
+  reply did not. Note that TraceVis does not set a Timestamp option on its own
+  probes, so this fires only on imported packets (`--packet`) and RIPE Atlas
+  data.
+- **IP-ID entropy** — classified per responding hop address across all repeat
+  probes at that hop:
+  - `sequential` — the IDs advance monotonically by a small bounded amount: one
+    global counter, the ordinary Linux/BSD stack signature. The bound is not 1,
+    because a router emits other traffic between our probes.
+  - `constant` — every ID identical: a device that runs no per-packet counter,
+    or a host that always sends ID 0 with DF set.
+  - `random` — no discernible pattern; consistent with a middlebox that
+    randomises the field.
+  - `unknown` — fewer than two replies from that address; not enough to say.
+
 ## DNS resilience (DoT/DoH + dnstt + blackhole routing)
 
 In networks where DNS is hijacked into the `10.10.34.0/24` filter net, or where
@@ -434,10 +495,31 @@ combined graph with per-VP colour-coded edges. `--ioda-country IR` (default)
 cross-checks IODA outage data and annotates VPs whose source is in an
 active-outage country.
 
+Add `--reverse-path` to mark the segment every probe traverses identically on
+its way to the destination:
+
+```sh
+python3 ./tracevis.py --vps [probe-id1,probe-id2,...] -I [msm-id1,...] --reverse-path
+```
+
+It reports how many shared hops it found, or says so when no destination was
+reached from two or more distinct probes.
+
 ##### Visualize a json file:
 
 ```sh
 python3 ./tracevis.py --file ./path/to/file.json
+
+# with the Plotly backend, click-to-highlight, and reverse-path marking
+python3 ./tracevis.py --file ./path/to/file.json \
+    --renderer plotly --highlight-selected --reverse-path
+```
+
+Several files can be combined into one graph, which is also how `--reverse-path`
+gets more than one vantage point without RIPE Atlas:
+
+```sh
+python3 ./tracevis.py --file ./vp1.json ./vp2.json --reverse-path
 ```
 
 or with docker image:

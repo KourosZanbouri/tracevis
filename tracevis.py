@@ -215,6 +215,21 @@ def get_args(sys_args, auto_exit=True):
                         action='store_true',
                         help="show an allowlisted-tier overlay legend on the "
                              "rendered graph (backlog §2.4)")
+    parser.add_argument('--highlight-selected', dest='highlight_selected',
+                        action='store_true',
+                        help="click an edge in the rendered graph to highlight "
+                             "the upstream path to it (GitHub issue #2)")
+    parser.add_argument('--renderer', dest='renderer', default="visjs",
+                        choices=["visjs", "plotly"],
+                        help="graphing backend for the rendered HTML "
+                        "(GitHub issue #64; default: visjs)")
+    parser.add_argument('--reverse-path', dest='reverse_path',
+                        action='store_true',
+                        help="detect VP convergence and mark the shared "
+                        "last-mile segment as a reverse-path leg "
+                        "(GitHub issue #44; needs a measurement holding the "
+                        "same destination from 2+ vantage points, via --vps "
+                        "or several -f files)")
     parser.add_argument('--ipv4', dest='ipv4', action='store_true',
                         help="force IPv4-only probing and socket binding "
                              "(GitHub issue #69)")
@@ -500,7 +515,10 @@ def main(args):
         if utils.vis.vis(
                 measurement_path=measurement_path, attach_jscss=attach_jscss,
                 edge_lable=edge_lable,
-                phase_overlay=bool(args.get("phase_overlay"))):
+                phase_overlay=bool(args.get("phase_overlay")),
+                highlight_selected=bool(args.get("highlight_selected")),
+                renderer=args.get("renderer", "visjs"),
+                reverse_path=bool(args.get("reverse_path"))):
             print("finished.")
 
 

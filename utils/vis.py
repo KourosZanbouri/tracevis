@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 
+import ast
 import html
 import ipaddress
 import json
 import os
 import socket
+from collections import namedtuple
+from itertools import pairwise
 
 import networkx as nx
-import pyvis._version
-from pyvis.network import Network
 
 import utils.convert_packetlist
 import utils.dpi
+import utils.renderer
 
 ROUTER_COLOR = "green"
 WINDOWS_COLOR = "blue"
@@ -111,6 +113,229 @@ def calculate_chksum(ip_in_icmp, sent_ttl):
     else:
         checksum_str = received_chksum
     return checksum_str
+
+
+# --- middlebox fingerprinting (GitHub issue #47) -----------------------------
+
+MiddleboxFingerprint = namedtuple("MiddleboxFingerprint", [
+    "mss_clamped", "mss_clamp_value", "ts_stripped", "ipid_pattern",
+])
+
+NO_FINGERPRINT = MiddleboxFingerprint(
+    mss_clamped=False, mss_clamp_value=None, ts_stripped=False,
+    ipid_pattern="unknown")
+
+# Common MSS clamp values observed in the wild — middleboxes that rewrite
+# the advertised MSS almost always clamp it to one of these (or a nearby
+# value to avoid fragmentation on a lower-MTU link). A clamp *to one of these*
+# is stronger evidence of a deliberate middlebox rewrite than an arbitrary
+# smaller MSS, which can also come from a genuinely lower-MTU peer, so
+# ``mss_clamp_value`` carries the observed value and the tooltip says which
+# case it is.
+MSS_CLAMP_VALUES = frozenset({1350, 1380, 1420, 1440, 1452, 1460})
+
+# Upper bound on a per-packet IP-ID increment that still counts as a
+# monotonic global counter rather than randomisation.
+#
+# The naive rule is ``delta == 1``, but that only holds when our probes are
+# the *only* traffic the responder emits. A real router or middlebox runs a
+# single global IP-ID counter shared by every flow it originates, so between
+# two of our probes it has usually sent a handful of other packets and the
+# ID advances by more than one. Measured against this repository's own
+# captures, ``delta == 1`` classified 0 of 164 hops as sequential while 116
+# of them show exactly this signature (e.g. 41021 → 41029 → 41037). Those
+# were all being reported as "random", which the tooltip presents as evidence
+# of a randomising middlebox — a false positive on the majority of hops.
+IPID_SEQUENTIAL_MAX_DELTA = 2048
+
+# IP-ID is a 16-bit field, so a global counter wraps. Deltas are computed
+# modulo this so a wrap does not read as a backwards jump.
+IPID_MODULUS = 1 << 16
+
+
+def _parse_tcp_options(options_str):
+    """Parse the stringified TCP options from a serialized packet.
+
+    ``packet2json`` writes ``options`` as ``repr`` of the scapy options list,
+    e.g. ``"[('MSS', 1460), ('SAckOK', b''), ('WScale', 6), ('TS', '0:1')]``.
+    """
+    if not options_str:
+        return []
+    try:
+        return ast.literal_eval(options_str)
+    except (ValueError, SyntaxError):
+        return []
+
+
+def _extract_mss(options):
+    """Return the MSS value from a parsed options list, or None."""
+    for name, value in options:
+        if name.upper() == "MSS":
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+_TIMESTAMP_OPTION_NAMES = frozenset({"TS", "TIMESTAMP"})
+
+
+def _has_timestamp_option(options):
+    """True when a TCP Timestamp option is present in the list.
+
+    scapy names this option ``TS``; other serialisers spell it ``Timestamp``.
+    Both are matched case-insensitively — the previous
+    ``name.upper() == "Timestamp"`` comparison could never be true, because an
+    upper-cased string never equals a mixed-case literal.
+    """
+    for name, _value in options:
+        if str(name).upper() in _TIMESTAMP_OPTION_NAMES:
+            return True
+    return False
+
+
+def _collect_ip_ids(received_packets):
+    """Return the IP-ID values carried by a list of serialized packets."""
+    ip_ids = []
+    for pkt in received_packets:
+        ip_layer = pkt.get("IP") if isinstance(pkt, dict) else None
+        if not ip_layer:
+            continue
+        try:
+            ip_ids.append(int(str(ip_layer.get("id")), 0))
+        except (TypeError, ValueError):
+            continue
+    return ip_ids
+
+
+def _classify_ipid_pattern(received_packets):
+    """Classify the IP-ID sequence across multiple received packets.
+
+    Returns one of: ``"constant"``, ``"sequential"``, ``"random"``,
+    ``"unknown"`` (when there is not enough data).
+
+    - **constant**  : every IP-ID is identical — a device that does not run a
+                      per-packet counter (some NATs, load-balancers), or a
+                      host that always sends ID 0 with DF set.
+    - **sequential**: IP-IDs advance monotonically by a small, bounded amount
+                      — a single global counter, the classic Linux/BSD stack
+                      signature. See ``IPID_SEQUENTIAL_MAX_DELTA`` for why the
+                      bound is not 1.
+    - **random**    : no discernible pattern — modern firewalls and
+                      middleboxes that randomize.
+    - **unknown**   : fewer than two usable IP-IDs; cannot classify.
+
+    Zero IDs are kept in the sequence rather than filtered out, so the
+    "constant" test and the delta test see the same data. Filtering them for
+    one test but not the other made ``[0, 5, 5]`` report "constant".
+    """
+    ip_ids = _collect_ip_ids(received_packets)
+
+    if len(ip_ids) < 2:
+        return "unknown"
+
+    if len(set(ip_ids)) == 1:
+        return "constant"
+
+    # Wrap-aware deltas: a 16-bit counter rolling over 65535 → 3 is an
+    # increment of 4, not a jump of -65532.
+    deltas = [(b - a) % IPID_MODULUS for a, b in pairwise(ip_ids)]
+    if all(0 < d <= IPID_SEQUENTIAL_MAX_DELTA for d in deltas):
+        return "sequential"
+
+    return "random"
+
+
+def fingerprint_middlebox(sent, received, ipid_packets=None):
+    """Apply two fingerprinting techniques to a hop's sent/received packets.
+
+    GitHub issue #47. Returns a :class:`MiddleboxFingerprint` namedtuple:
+
+    - ``mss_clamped``     : sent MSS > received MSS (MSS clamping by a NAT/DPI).
+    - ``mss_clamp_value`` : the received MSS when clamped, else ``None``. When
+                            it is one of :data:`MSS_CLAMP_VALUES` the rewrite
+                            matches a well-known middlebox clamp.
+    - ``ts_stripped``     : sent carries a TCP Timestamp option but the received
+                            reply does not (TCP option stripping).
+    - ``ipid_pattern``    : ``"constant"`` / ``"sequential"`` / ``"random"`` /
+                            ``"unknown"`` — the entropy of the IP-ID field
+                            for this hop.
+
+    ``ipid_packets`` supplies the packet list used for the IP-ID analysis.
+    It defaults to ``received``, but callers should pass every reply collected
+    from the *same responding IP across all repeat probes at this hop*.
+    IP-ID entropy is a property of the responder, not of one probe: tracevis
+    records each repeat as its own result with at most one received packet, so
+    classifying within a single result leaves ~99% of hops at "unknown".
+    Aggregating per responder raised that from 22 to 155 classified hops
+    across this repository's own captures.
+
+    All analyses work on the JSON-serialized packet dicts produced by
+    ``convert_packetlist.packet2json``. They are best-effort: when the needed
+    fields are absent (e.g. ICMP time-exceeded packets that don't carry TCP
+    options) the corresponding flag stays False.
+    """
+    mss_clamped = False
+    mss_clamp_value = None
+    ts_stripped = False
+
+    sent_tcp = sent.get("TCP") if isinstance(sent, dict) else None
+    if sent_tcp:
+        sent_options = _parse_tcp_options(sent_tcp.get("options"))
+        sent_mss = _extract_mss(sent_options)
+        sent_has_ts = _has_timestamp_option(sent_options)
+
+        for recv_pkt in reversed(received):
+            recv_tcp = recv_pkt.get("TCP") if isinstance(recv_pkt, dict) else None
+            if not recv_tcp:
+                continue
+            recv_options = _parse_tcp_options(recv_tcp.get("options"))
+            recv_mss = _extract_mss(recv_options)
+            if sent_mss is not None and recv_mss is not None and recv_mss < sent_mss:
+                mss_clamped = True
+                mss_clamp_value = recv_mss
+            if sent_has_ts and not _has_timestamp_option(recv_options):
+                ts_stripped = True
+            break
+
+    ipid_pattern = _classify_ipid_pattern(
+        received if ipid_packets is None else ipid_packets)
+
+    if not mss_clamped and not ts_stripped and ipid_pattern == "unknown":
+        return NO_FINGERPRINT
+
+    return MiddleboxFingerprint(
+        mss_clamped=mss_clamped,
+        mss_clamp_value=mss_clamp_value,
+        ts_stripped=ts_stripped,
+        ipid_pattern=ipid_pattern,
+    )
+
+
+def collect_hop_ipid_packets(hop_results):
+    """Group every received packet at one hop by the IP that replied.
+
+    ``hop_results`` is the ``result`` list of a single hop entry — one element
+    per repeat probe. Returns ``{responder_ip: [packet, ...]}`` so
+    :func:`fingerprint_middlebox` can classify IP-ID entropy per responder
+    across all repeats instead of within a single probe.
+    """
+    per_responder = {}
+    for result in hop_results:
+        if not isinstance(result, dict):
+            continue
+        from_ip = result.get("from")
+        if not from_ip or from_ip == "***":
+            continue
+        packets = result.get("packets")
+        if not isinstance(packets, dict):
+            continue
+        received = packets.get("received")
+        if not received:
+            continue
+        per_responder.setdefault(from_ip, []).extend(received)
+    return per_responder
 
 
 def detect_nat_pep_middlebox(sent, received):
@@ -231,7 +456,7 @@ def tooltips_append_lines(is_nat, is_middlebox, is_pep, packet_type, tcpflag,
                           dpi_cleared=False, cgnat_hop=False, sni_inspected=False,
                           rst_flood=False, tcp_silently_dropped=False,
                           forgery_evidence="", is_cgnat_hop=False,
-                          allowlist_boundary=False):
+                          allowlist_boundary=False, fingerprint=None):
     append_line = ''
     if packet_type == "TCP":
         append_line = "<br/>response TCP flag: " + tcpflag
@@ -251,6 +476,20 @@ def tooltips_append_lines(is_nat, is_middlebox, is_pep, packet_type, tcpflag,
         tooltip += "<br/>Per-hop CGNAT: True"
     if allowlist_boundary:
         tooltip += "<br/>Allowlist boundary: tier transition"
+    # GitHub issue #47: middlebox fingerprint — TCP option mutation and
+    # IP-ID entropy. Only shown when the fingerprint is non-trivial.
+    if fingerprint is not None:
+        if fingerprint.mss_clamped:
+            tooltip += "<br/>MSS clamped: received MSS < sent MSS"
+            if fingerprint.mss_clamp_value is not None:
+                tooltip += " (" + str(fingerprint.mss_clamp_value)
+                if fingerprint.mss_clamp_value in MSS_CLAMP_VALUES:
+                    tooltip += ", a well-known clamp"
+                tooltip += ")"
+        if fingerprint.ts_stripped:
+            tooltip += "<br/>TCP timestamps stripped"
+        if fingerprint.ipid_pattern != "unknown":
+            tooltip += "<br/>IP-ID pattern: " + fingerprint.ipid_pattern
     return tooltip
 
 
@@ -300,24 +539,119 @@ def initialize_first_nodes_nx(src_addr, length_all):
     return nodes
 
 
-def save_measurement_graph(graph_name, attach_jscss, phase_overlay=False):
-    net_vis = Network("1500px", "1500px",
-                      directed=True, bgcolor="#eeeeee")
-    if pyvis._version.__version__ > '0.1.9':
-        net_vis.from_nx(multi_directed_graph, show_edge_weights=False)
-    else:
-        net_vis.from_nx(multi_directed_graph)
-    net_vis.set_edge_smooth('dynamic')
-    if attach_jscss:
-        net_vis.set_template(OFFLINE_TEMPLATE_PATH)
-    else:
-        net_vis.set_template(MAIN_TEMPLATE_PATH)
-    if graph_name.endswith(".json"):
-        graph_name = graph_name[:-5]
-    graph_path = graph_name + ".html"
-    html_content = net_vis.generate_html()
-    if phase_overlay:
-        html_content = _inject_phase_overlay(html_content)
+def _vp_identity(measurement):
+    """Identify the vantage point a measurement came from.
+
+    Prefers the explicit RIPE Atlas probe id; falls back to the source address
+    so a locally-run multi-source capture still counts as distinct VPs.
+    """
+    return measurement.get("vp") or measurement.get("src_addr", "")
+
+
+def _extract_vp_hop_sequence(measurement):
+    """Return one responder set per hop, source to destination, for one VP.
+
+    Reads the raw measurement JSON (the same dict ``vis()`` iterates over).
+    Star hops (``"***"``) contribute nothing. The destination is appended as
+    the final set so the comparison covers the full path.
+
+    A *set per hop* rather than a flat list of every reply matters: tracevis
+    sends ``--repeat`` probes per hop and records each as its own result, so a
+    flat list repeated each IP once per probe. Two VPs that lost a different
+    number of probes then had different list lengths and the positional
+    suffix comparison silently misaligned. Sets also handle a load-balanced
+    hop that answers from several addresses.
+
+    Addresses are normalised through :func:`resolve_or_ip` so they match the
+    node labels in the rendered graph, which are normalised the same way.
+    Without this, a hostname destination (GitHub issue #68) produced a
+    convergence set holding the hostname while the graph node was labelled
+    with the resolved IP, and nothing ever matched.
+    """
+    hops = []
+    for hop_entry in measurement.get("result", []):
+        responders = set()
+        for result in hop_entry.get("result", []):
+            if not isinstance(result, dict):
+                continue
+            from_ip = result.get("from")
+            if from_ip and from_ip != "***":
+                responders.add(resolve_or_ip(from_ip))
+        if responders:
+            hops.append(responders)
+    dst_addr = measurement.get("dst_addr", "")
+    if dst_addr:
+        dst_addr = resolve_or_ip(dst_addr)
+        if not hops or dst_addr not in hops[-1]:
+            hops.append({dst_addr})
+    return hops
+
+
+def _find_vp_convergence(measurements):
+    """Find the convergence point across multiple VP traces.
+
+    GitHub issue #44 (reverse traceroute). When tracing the same destination
+    from N vantage points, the forward paths diverge near the VPs but converge
+    toward the destination. The shared suffix — the last segment where *all*
+    VPs agree — approximates the reverse/last-mile path that is common to every
+    observation.
+
+    Measurements are **grouped by destination** before comparison. A multi-VP
+    capture holds one measurement per (VP × destination), and tracevis's core
+    workflow compares an accessible and a blocked destination in one run. The
+    previous version pooled every measurement regardless of destination, so
+    the differing final hops broke the suffix walk immediately and the
+    function returned an empty set for every real multi-destination capture —
+    the flag rendered its legend and marked nothing.
+
+    A destination only contributes if at least two *distinct* vantage points
+    traced it; two runs from one VP share their whole path by construction and
+    would flag the entire graph as a reverse-path leg.
+
+    Returns the union of the shared suffixes across destinations, as a set of
+    hop addresses. Returns an empty set when no destination was reached from
+    two or more distinct VPs.
+    """
+    by_destination = {}
+    for measurement in measurements:
+        dst = resolve_or_ip(measurement.get("dst_addr", ""))
+        by_destination.setdefault(dst, []).append(measurement)
+
+    converged = set()
+    for group in by_destination.values():
+        if len({_vp_identity(m) for m in group}) < 2:
+            continue
+
+        sequences = [_extract_vp_hop_sequence(m) for m in group]
+        if any(not seq for seq in sequences):
+            continue
+
+        # Walk backward from the destination while every VP still has a
+        # responder in common at that position.
+        min_len = min(len(seq) for seq in sequences)
+        for i in range(1, min_len + 1):
+            shared = set(sequences[0][-i])
+            for seq in sequences[1:]:
+                shared &= seq[-i]
+            if not shared:
+                break
+            converged |= shared
+
+    return converged
+
+
+def save_measurement_graph(graph_name, attach_jscss, phase_overlay=False,
+                           highlight_selected=False, renderer="visjs",
+                           reverse_path=False, reverse_path_ips=None):
+    renderer_obj = utils.renderer.get_renderer(renderer)
+    result = renderer_obj.render(
+        multi_directed_graph, graph_name,
+        attach_jscss=attach_jscss, phase_overlay=phase_overlay,
+        highlight_selected=highlight_selected,
+        reverse_path=reverse_path,
+        reverse_path_ips=reverse_path_ips)
+    html_content = result.html
+    graph_path = result.graph_path
     with open(graph_path, "w", encoding="utf-8") as f:
         f.write(html_content)
     print("saved: " + graph_path)
@@ -350,8 +684,156 @@ def _inject_phase_overlay(html_content):
     return html_content[:insertion_point] + overlay_html + html_content[insertion_point:]
 
 
+def _inject_edge_highlight(html_content):
+    """GitHub issue #2: inject edge-click path highlighting into the rendered graph.
+
+    Clicking an edge highlights the entire upstream path from the source node
+    to that edge. Clicking the background (no node/edge) clears the highlight.
+    """
+    js = """
+    <script>
+    (function() {
+        if (typeof network === 'undefined' || !network) return;
+        var HIGHLIGHT = '#ff9500';
+        // Remember each element's own colour before overwriting it. Setting
+        // the colour back to `undefined` on clear does not restore anything —
+        // it drops the element to the vis.js default and permanently destroys
+        // the DPI / forgery / OS colour coding after a single click.
+        var savedEdgeColors = {};
+        var savedNodeColors = {};
+
+        function paintEdge(id) {
+            if (!(id in savedEdgeColors)) {
+                var e = edges.get(id);
+                savedEdgeColors[id] = e ? e.color : undefined;
+            }
+            edges.update({id: id, color: HIGHLIGHT});
+        }
+        function paintNode(id) {
+            if (!(id in savedNodeColors)) {
+                var n = nodes.get(id);
+                savedNodeColors[id] = n ? n.color : undefined;
+            }
+            nodes.update({id: id, color: HIGHLIGHT});
+        }
+        function clearHighlight() {
+            Object.keys(savedEdgeColors).forEach(function(id) {
+                edges.update({id: id, color: savedEdgeColors[id]});
+            });
+            Object.keys(savedNodeColors).forEach(function(id) {
+                nodes.update({id: id, color: savedNodeColors[id]});
+            });
+            savedEdgeColors = {};
+            savedNodeColors = {};
+        }
+        function highlightPathToEdge(edgeId) {
+            clearHighlight();
+            var edge = edges.get(edgeId);
+            if (!edge) return;
+            // A traced path can contain a routing loop, and a multi-VP graph
+            // gives most nodes several parents. Without a visited set the
+            // upstream walk revisits an edge forever and hangs the tab, with
+            // a DataSet update (and redraw) on every iteration.
+            var seenEdges = {};
+            var currentEdge = edgeId;
+            paintNode(edge.to);
+            while (currentEdge !== undefined && !seenEdges[currentEdge]) {
+                seenEdges[currentEdge] = true;
+                paintEdge(currentEdge);
+                var e = edges.get(currentEdge);
+                if (!e || !e.from) break;
+                paintNode(e.from);
+                var incoming = edges.get({
+                    returnType: "id",
+                    filter: function(e2) { return e2.to === e.from; }
+                });
+                currentEdge = undefined;
+                if (incoming) {
+                    // Prefer an edge we have not walked yet, so parallel
+                    // edges between the same pair do not end the walk early.
+                    for (var i = 0; i < incoming.length; i++) {
+                        if (!seenEdges[incoming[i]]) {
+                            currentEdge = incoming[i];
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        network.on("click", function(params) {
+            if (params.edges.length > 0 && params.nodes.length === 0) {
+                highlightPathToEdge(params.edges[0]);
+            } else {
+                clearHighlight();
+            }
+        });
+    })();
+    </script>"""
+    insertion_point = html_content.find("</body>")
+    if insertion_point == -1:
+        insertion_point = len(html_content)
+    return html_content[:insertion_point] + js + html_content[insertion_point:]
+
+
+def _inject_reverse_path_legend(html_content):
+    """GitHub issue #44: inject a legend explaining the reverse-path edges."""
+    legend_html = (
+        '<div id="reverse-path-legend" style="'
+        'position:fixed;top:60px;right:20px;'
+        'background:rgba(255,165,0,0.9);'
+        'color:#000;padding:8px;border-radius:8px;'
+        'font-size:12px;font-family:sans-serif;'
+        'border:2px solid #ff8c00;z-index:1000;">'
+        'Reverse-path leg<br/>'
+        '<span style="font-size:10px;">'
+        '(VP convergence)</span>'
+        '</div>'
+    )
+    insertion_point = html_content.find("</body>")
+    if insertion_point == -1:
+        insertion_point = len(html_content)
+    return html_content[:insertion_point] + legend_html + html_content[insertion_point:]
+
+
+# Network states in which the rendered page cannot count on reaching a CDN.
+# "shutdown" is a total block; "allowlisted" means only a permitted set of
+# destinations resolves, and cdnjs.cloudflare.com is not usually on it.
+CENSORED_NETWORK_STATES = frozenset({"shutdown", "allowlisted"})
+
+
+def observed_censored_states(measurements):
+    """Return the censored network states recorded in a measurement list."""
+    return {
+        state for state in (
+            m.get("network_state", "") for m in measurements
+            if isinstance(m, dict)
+        )
+        if state in CENSORED_NETWORK_STATES
+    }
+
+
+def needs_offline_assets(measurements):
+    """True when the graph must embed its JS/CSS instead of linking a CDN.
+
+    ``template_main.html.jinja`` pulls vis.js and vis.css from
+    cdnjs.cloudflare.com. On the networks this tool exists to measure that
+    host is exactly what is unreachable, and the operator is left with a
+    blank page.
+
+    This used to be driven solely by ``no_internet``, which GitHub issue #75
+    redefined: a DNS answer now proves the network is up, so a DNS-hijacked
+    shutdown reports ``no_internet=False`` and the CDN fallback stopped
+    firing on the one network that most needs it. Deciding from the recorded
+    ``network_state`` instead keeps issue #75's connectivity fix intact and
+    also covers rendering a saved measurement later with ``-f``, where no
+    live connectivity check happens at all.
+    """
+    return bool(observed_censored_states(measurements))
+
+
 def vis(measurement_path, attach_jscss, edge_lable: str = "none",
-        phase_overlay: bool = False):
+        phase_overlay: bool = False, highlight_selected: bool = False,
+        renderer="visjs", reverse_path=False):
     # The graph is module-level, and nothing used to clear it: a second call in
     # the same process rendered the first measurement's nodes into the second
     # file. The CLI renders once per run so it never surfaced there, but it made
@@ -360,6 +842,11 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
     all_measurements = []
     with open(measurement_path) as json_file:
         all_measurements = json.load(json_file)
+    if not attach_jscss and needs_offline_assets(all_measurements):
+        print("· · · - · network state is "
+              + ", ".join(sorted(observed_censored_states(all_measurements)))
+              + ": embedding JS/CSS so the graph opens without a CDN")
+        attach_jscss = True
     measurement_steps = 0
     src_addr = all_measurements[0]["src_addr"]
     src_addr = resolve_or_ip(src_addr)
@@ -404,6 +891,10 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
             current_ttl = try_step["hop"]
             current_ttl_str = str(current_ttl)
             results = try_step["result"]
+            # GitHub issue #47: IP-ID entropy is a property of the responder,
+            # so gather every reply from each responding IP across all repeat
+            # probes at this hop before classifying any single one of them.
+            hop_ipid_packets = collect_hop_ipid_packets(results)
             repeat_steps = 0
             skip_next = False
             for result in results:
@@ -461,6 +952,18 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
                                     is_nat, is_middlebox, is_pep, packet_type, tcpflag = detect_nat_pep_middlebox(
                                         result['packets']['sent'], result['packets']['received']
                                     )
+                                    # GitHub issue #47: two new middlebox
+                                    # fingerprinting techniques — TCP option
+                                    # mutation (MSS clamping, timestamp
+                                    # stripping) and IP-ID entropy analysis.
+                                    # The IP-ID sample is every reply this
+                                    # responder sent across all repeat probes
+                                    # at this hop, not just this one probe's.
+                                    fingerprint = fingerprint_middlebox(
+                                        result['packets']['sent'],
+                                        result['packets']['received'],
+                                        ipid_packets=hop_ipid_packets.get(
+                                            answer_ip))
                                     # M4 per-hop
                                     # DPI/CGNAT/SNI posture. Combine the
                                     # path-level struct fields (set in trace.py)
@@ -561,7 +1064,8 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
                                         tcp_silently_dropped=tcp_silently_dropped,
                                         forgery_evidence=forgery_evidence,
                                         is_cgnat_hop=cgnat_observed,
-                                        allowlist_boundary=is_allowlist_boundary)
+                                        allowlist_boundary=is_allowlist_boundary,
+                                        fingerprint=fingerprint)
                                     if (is_middlebox_ttl or is_middlebox):
                                         already_detected[repeat_steps]["is_middlebox"] = True
                                     if is_pep:
@@ -614,6 +1118,22 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
                 repeat_steps += 1
         measurement_steps += 1
     print("saving measurement graph...")
+    reverse_path_ips = None
+    if reverse_path:
+        reverse_path_ips = _find_vp_convergence(all_measurements)
+        if reverse_path_ips:
+            print("· · · - · reverse-path convergence: "
+                  + str(len(reverse_path_ips)) + " shared hop(s)")
+        else:
+            # Say so rather than rendering a legend for edges that do not
+            # exist. The usual cause is a capture with only one vantage point
+            # per destination, which has nothing to cross-reference.
+            print("· · · - · --reverse-path: no destination was traced from "
+                  "two or more vantage points; nothing to mark")
     save_measurement_graph(measurement_path, attach_jscss,
-                           phase_overlay=phase_overlay)
+                           phase_overlay=phase_overlay,
+                           highlight_selected=highlight_selected,
+                           renderer=renderer,
+                           reverse_path=reverse_path,
+                           reverse_path_ips=reverse_path_ips)
     print("· · · - · -     · · · - · -     · · · - · -     · · · - · -")

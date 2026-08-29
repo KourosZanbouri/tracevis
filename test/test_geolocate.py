@@ -259,7 +259,7 @@ class TestProviderStatusIsRecorded(unittest.TestCase):
         with mock.patch.object(geolocate, "probe_providers",
                                return_value=({"clientIp": "198.51.100.4"}, probes)), \
                 mock.patch.object(geolocate, "detect_dns_blackhole",
-                                  return_value=False):
+                                  return_value=geolocate.DnsResult(False, False)):
             result = geolocate.get_meta_vars()
         self.assertEqual(result[7], "cloudflare=silent,ipinfo=ok,ifconfig=ok")
 
@@ -333,15 +333,22 @@ class TestDetectDnsBlackhole(unittest.TestCase):
 
 
 class TestGetMetaVarsIntegration(unittest.TestCase):
-    def _patch(self, meta, blackhole, probes=None):
+    def _patch(self, meta, blackhole, probes=None, dns_resolved=None):
         if probes is None:
             # Every provider answered — the plain case, no differential.
             probes = [geolocate.ProviderProbe(p.name, None, True)
                       for p in geolocate.PROVIDERS]
+        # dns_resolved defaults to the same value as blackhole: if the
+        # blackhole check returned True, DNS must have resolved; if it
+        # returned False, treat it as resolved unless the caller says otherwise.
+        if dns_resolved is None:
+            dns_resolved = blackhole
         return (
             mock.patch.object(geolocate, "probe_providers",
                               return_value=(meta, probes)),
-            mock.patch.object(geolocate, "detect_dns_blackhole", return_value=blackhole),
+            mock.patch.object(geolocate, "detect_dns_blackhole",
+                              return_value=geolocate.DnsResult(blackholed=blackhole,
+                                                              resolved=dns_resolved)),
         )
 
     def test_open_path_populates_fields(self):
@@ -355,10 +362,16 @@ class TestGetMetaVarsIntegration(unittest.TestCase):
         self.assertEqual(state, "open")
 
     def test_shutdown_path_keeps_defaults(self):
+        """A shutdown regime: DNS resolves (into the blackhole) but no
+        metadata providers answered. DNS resolution proves the network is up,
+        so no_internet is False — but the regime is still 'shutdown' because
+        both signals agree on a total block. The old code set no_internet=True
+        whenever user_meta was None, which made a DNS-resolving shutdown look
+        like no-network-at-all. GitHub issue #75."""
         p1, p2 = self._patch(None, True)
         with p1, p2:
             no_internet, public_ip, _, _, _, _, state, _ = geolocate.get_meta_vars()
-        self.assertTrue(no_internet)
+        self.assertFalse(no_internet)
         self.assertEqual(public_ip, "127.1.2.7")
         self.assertEqual(state, "shutdown")
 
@@ -396,6 +409,28 @@ class TestGetMetaVarsIntegration(unittest.TestCase):
             result = geolocate.get_meta_vars()
         self.assertEqual(result[STATE], "allowlisted")
         self.assertFalse(result[0])
+
+    def test_dns_resolved_but_no_meta_is_not_no_internet(self):
+        """GitHub issue #75: the core race condition.
+
+        Metadata providers all failed (no_internet was True in the old code
+        because only user_meta is not None set it False), but DNS resolution
+        succeeded — the network came up between the meta probe and the DNS
+        probe. DNS resolving proves connectivity: no_internet must be False."""
+        p1, p2 = self._patch(None, False, dns_resolved=True)
+        with p1, p2:
+            no_internet, public_ip, _, _, _, _, state, _ = geolocate.get_meta_vars()
+        self.assertFalse(no_internet)
+        self.assertEqual(public_ip, "127.1.2.7")
+        self.assertEqual(state, "unknown")
+
+    def test_no_meta_and_dns_unreachable_is_no_internet(self):
+        """The genuinely offline case: neither metadata nor DNS succeeded."""
+        p1, p2 = self._patch(None, False, dns_resolved=False)
+        with p1, p2:
+            no_internet, public_ip, _, _, _, _, state, _ = geolocate.get_meta_vars()
+        self.assertTrue(no_internet)
+        self.assertEqual(state, "unknown")
 
 
 class TestRunGeolocate(unittest.TestCase):

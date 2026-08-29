@@ -5,6 +5,157 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (GitHub issue #44 — reverse-path detection via VP convergence)
+- **`_find_vp_convergence()` in `utils/vis.py`** detects the shared last-mile
+  segment across multiple VP traces. Measurements are grouped by destination,
+  and within each group the walk runs backward from the destination while every
+  vantage point still has a responder in common. Edges whose destination node
+  is in the resulting set are rendered as dashed amber — approximating the
+  reverse path that all Vantage Points observe identically. A legend overlay
+  explains the marking, and is emitted only when at least one edge actually
+  carries it. Works with both `--renderer visjs` and `--renderer plotly`.
+- `--reverse-path` CLI flag in `tracevis.py`. It needs a measurement holding
+  the same destination from two or more distinct vantage points (via `--vps`,
+  or several `-f` files combined); with a single VP it says so and marks
+  nothing.
+
+### Added (GitHub issue #64 — graphing backend abstraction)
+- New module `utils/renderer.py`: `Renderer` base class + `VisJsRenderer`
+  (wraps the existing pyvis/vis.js path) and `PlotlyRenderer` (Plotly.js with a
+  numpy-free layered layout that places nodes in columns by hop distance).
+  `get_renderer()` dispatches by name. The Plotly backend groups edge segments
+  by colour into a handful of traces rather than one trace per edge, and
+  carries per-point hover text so each node and edge shows its own tooltip.
+- `save_measurement_graph()` and `vis()` now accept a `renderer=` parameter;
+  `--renderer {visjs,plotly}` CLI flag added. The pyvis import is now isolated
+  inside `renderer.py`; `utils/vis.py` no longer imports it directly.
+
+### Added (GitHub issue #2 — edge-click path highlighting)
+- `_inject_edge_highlight()` in `utils/vis.py` injects JavaScript so clicking
+  an edge highlights the entire upstream path; clicking empty space restores
+  every element's original colour. The walk keeps a visited set, so a routing
+  loop in the traced path terminates instead of hanging the browser tab.
+  `--highlight-selected` CLI flag added. The Plotly backend implements the same
+  interaction through Plotly's own event emitter.
+
+### Added (GitHub issue #47 — middlebox fingerprinting)
+- New `MiddleboxFingerprint` namedtuple and `fingerprint_middlebox(sent,
+  received, ipid_packets=None)` function in `utils/vis.py` — TCP option
+  mutation analysis (MSS clamping, timestamp stripping) and IP-ID entropy
+  classification (constant, sequential, random). A detected clamp reports the
+  observed MSS and says whether it matches a well-known middlebox clamp value.
+  IP-ID entropy is classified per responding hop IP across all repeat probes,
+  via `collect_hop_ipid_packets()`. Fingerprint data appears in hop tooltips.
+
+  Note: `ts_stripped` can only fire on probes that carry a TCP Timestamp
+  option. tracevis does not set one on its own probes, so in practice this
+  signal applies to imported packets (`--packet`) and RIPE Atlas data.
+
+### Added (GitHub issue #75 — DNS resolution race condition)
+- `detect_dns_blackhole()` now returns a `DnsResult` object with explicit
+  `blackholed` and `resolved` fields; `__bool__` returns `blackholed` for
+  backward compatibility. `get_meta_vars()` no longer conflates "DNS unreachable"
+  with "no internet" — a reachable `user_meta` (or a resolved DNS probe) now
+  correctly clears `no_internet` even when the blackhole probe timed out.
+- Because `no_internet` now means "the network is reachable" rather than "we
+  got metadata", it is no longer the right signal for deciding whether the
+  rendered graph may link its JS/CSS from a CDN. That decision moved to
+  `utils.vis.needs_offline_assets()`, which reads the recorded `network_state`.
+
+### Fixed (review of the #2 / #44 / #47 / #64 / #75 work)
+Each of these was found by exercising the new flags against this repository's
+own captures rather than by re-reading the code; the numbers below come from
+those captures.
+
+- **`--reverse-path` marked nothing at all.** Four independent faults stacked
+  up, and the flag rendered its "reverse-path leg" legend over a graph with no
+  reverse-path edges on it:
+  - `_find_vp_convergence()` pooled every measurement regardless of
+    destination. A multi-VP capture holds one measurement per (VP x
+    destination), and comparing an accessible against a blocked destination is
+    tracevis's core workflow — so the differing final hops broke the suffix
+    walk on its first step and the function returned an empty set. It now
+    groups by destination and unions the per-destination results.
+  - `VisJsRenderer` applied the amber/dashed styling to the networkx graph
+    *after* `from_nx()` had already copied it into pyvis, so the styling never
+    reached the page. It now runs before the copy, on a clone, leaving the
+    caller's graph unmutated.
+  - The dash was written as `dash`, which vis.js ignores; the property is
+    `dashes`.
+  - The convergence set held raw addresses while graph node labels are
+    normalised through `resolve_or_ip()`, so a hostname destination could
+    never match. Both sides are normalised now.
+  - A destination now needs two *distinct* vantage points to count. Two runs
+    from one VP share their whole path by construction and previously flagged
+    the entire graph.
+  - The legend is emitted only when at least one edge carries the marking;
+    otherwise the run says why nothing was marked.
+
+- **IP-ID fingerprinting reported the opposite of the truth on most hops.**
+  `_classify_ipid_pattern()` required consecutive IDs to differ by exactly 1 to
+  count as sequential. Routers run one global IP-ID counter shared across every
+  flow they originate, so between two of our probes the ID advances by more
+  than one (41021 -> 41029 -> 41037 is a typical observed sequence). Across the
+  captures in this repository the old rule found 0 of 164 hops sequential and
+  labelled all 164 "random" — which the tooltip presents as evidence of a
+  randomising middlebox. The rule is now "monotonic with a bounded increment"
+  (`IPID_SEQUENTIAL_MAX_DELTA`, wrap-aware): 116 sequential, 39 random, 9
+  constant.
+- **IP-ID entropy was measured at the wrong level.** It was classified within a
+  single probe's `received` list, but tracevis records each repeat probe as its
+  own result carrying at most one packet, so 99% of hops came back "unknown".
+  `collect_hop_ipid_packets()` now groups every reply by responding IP across a
+  hop's repeats: 155 hops classifiable where 22 were before.
+- **`_classify_ipid_pattern()` was inconsistent about zero IDs** — the
+  "constant" test filtered them out while the delta test did not, so
+  `[0, 5, 5]` reported "constant". Both tests now see the same sequence.
+- **`_has_timestamp_option()` had a dead comparison.** `name.upper() ==
+  "Timestamp"` can never be true; only the `TS` spelling was ever matched.
+- **`--highlight-selected` did nothing under `--renderer plotly`, and shipped
+  in every Plotly page regardless of the flag.** `self._injected_js(
+  'highlight_selected')` passed a truthy string literal rather than the
+  argument. The handler was inert anyway: Plotly emits its events through
+  `gd.on()`, not `addEventListener`, and it read `event.trace` (not part of
+  Plotly's click payload) and called `Plotly.relayout` for a trace property.
+  The interaction is now implemented against Plotly's event emitter and gated
+  on the flag.
+- **The vis.js highlight walk could hang the browser tab.** It followed
+  incoming edges upstream with no visited set, so a routing loop in the traced
+  path looped forever, calling a DataSet update (and a redraw) each iteration.
+  It now carries a visited set. Clearing the highlight also used to write
+  `color: undefined`, which drops elements to the vis.js default rather than
+  restoring them, permanently destroying the DPI/forgery/OS colour coding after
+  one click; original colours are now saved and restored exactly.
+- **Plotly node and edge tooltips showed every other element's tooltip.**
+  `hovertemplate` was set to a single joined string, which Plotly applies to
+  every point in the trace. Hover text is now a per-point array.
+- **The Plotly backend emitted one trace per edge** (84 for this repository's
+  multi-VP capture). Segments are now grouped by colour into a handful of
+  traces plus one hover-marker trace — 8 instead of 84 for the same graph.
+- **The Plotly backend accepted `attach_jscss` and ignored it**, always linking
+  `cdn.plot.ly`. It now inlines a vendored bundle from `lib/plotly/plotly.min.js`
+  when one is present, and otherwise says plainly that the page will need the
+  CDN and that `--renderer visjs` produces a self-contained page.
+- **The Plotly circular layout was unreadable** for anything past a handful of
+  nodes — it placed hop 1 beside hop 12 and ran every edge across the middle of
+  the plot. Replaced with a layered layout that puts nodes in columns by hop
+  distance from the source.
+- **A censored network could produce a graph that needs a CDN.** The main
+  template links vis.js from `cdnjs.cloudflare.com`, and self-contained output
+  was triggered solely by `no_internet`. Issue #75 redefined that flag so a
+  DNS-hijacked shutdown reports `no_internet=False`, which stopped the fallback
+  firing on exactly the network that cannot reach a CDN. `vis()` now escalates
+  to embedded assets whenever a measurement records a `shutdown` or
+  `allowlisted` `network_state`, which also covers re-rendering a saved capture
+  with `-f`, where no live connectivity check happens.
+- Removed dead code the features left behind: `MSS_CLAMP_VALUES` and
+  `NO_FINGERPRINT` were defined and never used (both are now used),
+  `edge_is_reverse` was built and never read, `trace_count` was emitted into
+  the page unused, and `traceroute_data.middlebox_fingerprint` was added to the
+  constructor but never written or read by anything.
+- Restored the continuation-line alignment in `utils/geolocate.py` that the
+  issue #75 change de-indented.
+
 ### Fixed (post-M7 audit)
 - **An interrupted trace kept its pre-trace classification.** `Ctrl-C` wrote
   straight to disk, skipping the post-trace analysis entirely, so every detector

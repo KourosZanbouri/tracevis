@@ -9,8 +9,10 @@ information at all.
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 
 import utils.dpi
@@ -96,7 +98,8 @@ def make_measurement(
 class VisFixtureMixin:
     """Write a measurement list to a temp file, render it, return the HTML."""
 
-    def render(self, measurements, phase_overlay=False, edge_lable="backttl"):
+    def render(self, measurements, phase_overlay=False, edge_lable="backttl",
+               highlight_selected=False, reverse_path=False):
         directory = tempfile.mkdtemp()
         self.addCleanup(
             lambda: [os.remove(os.path.join(directory, n))
@@ -108,7 +111,9 @@ class VisFixtureMixin:
         with redirect_stdout(io.StringIO()):
             utils.vis.vis(measurement_path=path, attach_jscss=False,
                           edge_lable=edge_lable,
-                          phase_overlay=phase_overlay)
+                          phase_overlay=phase_overlay,
+                          highlight_selected=highlight_selected,
+                          reverse_path=reverse_path)
         with open(path.replace(".json", ".html"), errors="replace") as handle:
             return handle.read()
 
@@ -444,6 +449,23 @@ class TestHostnameRendering(VisFixtureMixin, unittest.TestCase):
         self.assertIn("127.0.0.1", page)
 
 
+class TestEdgeHighlight(VisFixtureMixin, unittest.TestCase):
+    """GitHub issue #2: highlight path of selected edge."""
+
+    def test_highlight_js_injected_when_enabled(self):
+        page = self.render([make_measurement()], highlight_selected=True)
+        self.assertIn("highlightPathToEdge", page)
+        self.assertIn("network.on", page)
+
+    def test_no_highlight_js_when_disabled(self):
+        page = self.render([make_measurement()], highlight_selected=False)
+        self.assertNotIn("highlightPathToEdge", page)
+
+    def test_clear_highlight_on_background_click(self):
+        page = self.render([make_measurement()], highlight_selected=True)
+        self.assertIn("clearHighlight", page)
+
+
 class TestIodaAnnotation(VisFixtureMixin, unittest.TestCase):
     """§2.2: IODA status cross-reference annotation on VP measurements."""
     def test_ioda_status_field_present_in_tooltip(self):
@@ -456,5 +478,677 @@ class TestIodaAnnotation(VisFixtureMixin, unittest.TestCase):
         self.assertIn("IR", page)
 
 
+class TestMiddleboxFingerprint(unittest.TestCase):
+    """GitHub issue #47: TCP option mutation and IP-ID entropy analysis."""
+
+    def test_mss_clamped_detected(self):
+        """Received MSS smaller than sent MSS → mss_clamped=True."""
+        sent = {"TCP": {"options": "[('MSS', 1460)]"}}
+        received = [{"TCP": {"options": "[('MSS', 1380)]"}}]
+        fp = utils.vis.fingerprint_middlebox(sent, received)
+        self.assertTrue(fp.mss_clamped)
+        self.assertFalse(fp.ts_stripped)
+        self.assertEqual(fp.ipid_pattern, "unknown")
+
+    def test_mss_not_clamped_when_receives_larger(self):
+        sent = {"TCP": {"options": "[('MSS', 1380)]"}}
+        received = [{"TCP": {"options": "[('MSS', 1460)]"}}]
+        fp = utils.vis.fingerprint_middlebox(sent, received)
+        self.assertFalse(fp.mss_clamped)
+
+    def test_timestamp_stripped_detected(self):
+        """Sent has TS option, received TCP reply does not."""
+        sent = {"TCP": {"options": "[('MSS', 1460), ('TS', '0:1')]"}}
+        received = [{"TCP": {"options": "[('MSS', 1460)]"}}]
+        fp = utils.vis.fingerprint_middlebox(sent, received)
+        self.assertTrue(fp.ts_stripped)
+
+    def test_timestamp_present_not_stripped(self):
+        sent = {"TCP": {"options": "[('MSS', 1460), ('TS', '0:1')]"}}
+        received = [{"TCP": {"options": "[('MSS', 1460), ('TS', '1:2')]"}}]
+        fp = utils.vis.fingerprint_middlebox(sent, received)
+        self.assertFalse(fp.ts_stripped)
+
+    def test_ipid_constant_pattern(self):
+        sent = {"IP": {"id": "100"}}
+        received = [
+            {"IP": {"id": "54321"}},
+            {"IP": {"id": "54321"}},
+            {"IP": {"id": "54321"}},
+        ]
+        fp = utils.vis.fingerprint_middlebox(sent, received)
+        self.assertEqual(fp.ipid_pattern, "constant")
+
+    def test_ipid_sequential_pattern(self):
+        sent = {"IP": {"id": "100"}}
+        received = [
+            {"IP": {"id": "54321"}},
+            {"IP": {"id": "54322"}},
+            {"IP": {"id": "54323"}},
+        ]
+        fp = utils.vis.fingerprint_middlebox(sent, received)
+        self.assertEqual(fp.ipid_pattern, "sequential")
+
+    def test_ipid_random_pattern(self):
+        sent = {"IP": {"id": "100"}}
+        received = [
+            {"IP": {"id": "54321"}},
+            {"IP": {"id": "12345"}},
+            {"IP": {"id": "54321"}},
+        ]
+        fp = utils.vis.fingerprint_middlebox(sent, received)
+        self.assertEqual(fp.ipid_pattern, "random")
+
+    def test_ipid_unknown_single_packet(self):
+        sent = {"IP": {"id": "100"}}
+        received = [{"IP": {"id": "54321"}}]
+        fp = utils.vis.fingerprint_middlebox(sent, received)
+        self.assertEqual(fp.ipid_pattern, "unknown")
+
+    def test_no_tcp_options_no_fingerprint(self):
+        """UDP/ICMP packets without TCP options → no mss/ts signals."""
+        sent = {"UDP": {"sport": "domain"}}
+        received = [{"UDP": {"sport": "domain"}}]
+        fp = utils.vis.fingerprint_middlebox(sent, received)
+        self.assertFalse(fp.mss_clamped)
+        self.assertFalse(fp.ts_stripped)
+        self.assertEqual(fp.ipid_pattern, "unknown")
+
+    def test_no_packets_no_fingerprint(self):
+        fp = utils.vis.fingerprint_middlebox({}, [])
+        self.assertFalse(fp.mss_clamped)
+        self.assertFalse(fp.ts_stripped)
+        self.assertEqual(fp.ipid_pattern, "unknown")
+
+
+class TestFingerprintInTooltip(VisFixtureMixin, unittest.TestCase):
+    """Fingerprint data must surface in the rendered tooltip."""
+
+    def test_mss_clamp_in_tooltip(self):
+        measurement = make_measurement()
+        # Replace a hop with TCP packets carrying different MSS values.
+        measurement["result"][1]["result"][0]["packets"] = {
+            "sent": {"IP": {"id": "100", "ttl": "1", "chksum": "0x0000",
+                            "src": "127.1.2.7", "dst": "1.1.1.1"},
+                     "TCP": {"options": "[('MSS', 1460)]", "dport": "443",
+                             "flags": "PA"}},
+            "received": [{"IP": {"id": "54321", "ttl": "64",
+                                 "src": "100.64.0.1", "dst": "127.1.2.7"},
+                          "TCP": {"options": "[('MSS', 1380)]", "flags": "A"}}],
+        }
+        page = self.render([measurement], edge_lable="none")
+        self.assertIn("MSS clamped", page)
+
+    def test_ipid_pattern_in_tooltip(self):
+        measurement = make_measurement()
+        measurement["result"][1]["result"][0]["packets"] = {
+            "sent": {"IP": {"id": "100", "ttl": "1", "chksum": "0x0000",
+                            "src": "127.1.2.7", "dst": "1.1.1.1"},
+                     "UDP": {"sport": "domain"}},
+            "received": [{"IP": {"id": "54321", "ttl": "64",
+                                 "src": "100.64.0.1", "dst": "127.1.2.7"},
+                          "UDP": {"sport": "domain"}},
+                         {"IP": {"id": "54321", "ttl": "64",
+                                 "src": "100.64.0.1", "dst": "127.1.2.7"},
+                          "UDP": {"sport": "domain"}}],
+        }
+        page = self.render([measurement], edge_lable="none")
+        self.assertIn("IP-ID pattern: constant", page)
+
+
+class TestVpConvergence(unittest.TestCase):
+    """GitHub issue #44: _find_vp_convergence detects the shared last-mile
+    segment across multiple VP traces."""
+
+    def _make_vp_measurement(self, src_addr, hops, vp=None):
+        result = []
+        for i, h in enumerate(hops):
+            step = i + 1
+            hop_entry = {"hop": step, "result": [h]}
+            result.append(hop_entry)
+        base = {
+            "dst_addr": "1.1.1.1",
+            "src_addr": src_addr,
+            "result": result,
+        }
+        if vp:
+            base["vp"] = vp
+        return base
+
+    def test_converges_at_destination(self):
+        """When VPs share only the destination, convergence set is {dst}."""
+        vp1 = self._make_vp_measurement("10.0.0.1", [
+            {"from": "100.64.0.1", "ttl": 64},
+            {"from": "1.1.1.1", "ttl": 64},
+        ])
+        vp2 = self._make_vp_measurement("10.0.0.2", [
+            {"from": "192.168.1.1", "ttl": 64},
+            {"from": "1.1.1.1", "ttl": 64},
+        ])
+        result = utils.vis._find_vp_convergence([vp1, vp2])
+        self.assertIn("1.1.1.1", result)
+
+    def test_converges_before_destination(self):
+        """When VPs share a multi-hop suffix, all shared IPs are returned."""
+        vp1 = self._make_vp_measurement("10.0.0.1", [
+            {"from": "100.64.0.1", "ttl": 64},
+            {"from": "203.0.113.5", "ttl": 64},
+            {"from": "203.0.113.1", "ttl": 64},
+            {"from": "1.1.1.1", "ttl": 64},
+        ])
+        vp2 = self._make_vp_measurement("10.0.0.2", [
+            {"from": "192.168.1.1", "ttl": 64},
+            {"from": "203.0.113.5", "ttl": 64},
+            {"from": "203.0.113.1", "ttl": 64},
+            {"from": "1.1.1.1", "ttl": 64},
+        ])
+        result = utils.vis._find_vp_convergence([vp1, vp2])
+        self.assertEqual(result, {"203.0.113.5", "203.0.113.1", "1.1.1.1"})
+
+    def test_single_vp_returns_empty(self):
+        """A single VP has no peer to converge with."""
+        vp1 = self._make_vp_measurement("10.0.0.1", [
+            {"from": "100.64.0.1", "ttl": 64},
+            {"from": "1.1.1.1", "ttl": 64},
+        ])
+        result = utils.vis._find_vp_convergence([vp1])
+        self.assertEqual(result, set())
+
+
+class TestReversePathRendering(VisFixtureMixin, unittest.TestCase):
+    """GitHub issue #44: --reverse-path marks converged edges as dashed amber."""
+
+    def _make_vp_measurement(self, src_addr, hops, vp=None):
+        result = []
+        for i, h in enumerate(hops):
+            step = i + 1
+            hop_entry = {"hop": step, "result": [h]}
+            if h.get("from") and h["from"] != "1.1.1.1":
+                sent_id = str(1 + step * 100)
+                recv_id = str(100 + step * 50)
+                h["packets"] = {
+                    "sent": {"IP": {"id": sent_id, "ttl": str(step),
+                                    "chksum": "0x0000",
+                                    "src": src_addr, "dst": "1.1.1.1"}},
+                    "received": [{"IP": {"id": recv_id, "ttl": str(h.get("ttl", 64)),
+                                         "src": h["from"], "dst": src_addr},
+                                  "UDP": {"sport": "domain"}}],
+                }
+            result.append(hop_entry)
+        base = {
+            "dst_addr": "1.1.1.1",
+            "src_addr": src_addr,
+            "result": result,
+        }
+        if vp:
+            base["vp"] = vp
+        return base
+
+    def test_reverse_path_legend_injected(self):
+        vp1 = self._make_vp_measurement("10.0.0.1", [
+            {"from": "100.64.0.1", "ttl": 64},
+            {"from": "1.1.1.1", "ttl": 64},
+        ], vp="1001")
+        vp2 = self._make_vp_measurement("10.0.0.2", [
+            {"from": "192.168.1.1", "ttl": 64},
+            {"from": "1.1.1.1", "ttl": 64},
+        ], vp="2002")
+        page = self.render([vp1, vp2], reverse_path=True, edge_lable="none")
+        self.assertIn("reverse-path-legend", page)
+
+    def test_reverse_path_no_legend_without_flag(self):
+        vp1 = self._make_vp_measurement("10.0.0.1", [
+            {"from": "100.64.0.1", "ttl": 64},
+            {"from": "1.1.1.1", "ttl": 64},
+        ], vp="1001")
+        vp2 = self._make_vp_measurement("10.0.0.2", [
+            {"from": "192.168.1.1", "ttl": 64},
+            {"from": "1.1.1.1", "ttl": 64},
+        ], vp="2002")
+        page = self.render([vp1, vp2], edge_lable="none")
+        self.assertNotIn("reverse-path-legend", page)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the review of the issue #2 / #44 / #47 / #64 / #75 work.
+# Each class documents the defect it pins down.
+# ---------------------------------------------------------------------------
+
+
+class TestIpIdSequentialBound(unittest.TestCase):
+    """`delta == 1` was too strict and inverted the verdict on most hops.
+
+    A router runs one global IP-ID counter shared by every flow it originates,
+    so between two of our probes it advances by more than one. Against this
+    repository's own captures the old rule classified 0 of 164 hops as
+    sequential and called all 164 "random" — which the tooltip presents as a
+    randomising middlebox.
+    """
+
+    def _pkts(self, ids):
+        return [{"IP": {"id": str(i)}} for i in ids]
+
+    def test_global_counter_signature_is_sequential(self):
+        """Real observed sequence from tracevis_data (delta 8)."""
+        self.assertEqual(
+            utils.vis._classify_ipid_pattern(self._pkts([41021, 41029, 41037])),
+            "sequential")
+
+    def test_small_increments_are_sequential(self):
+        for ids in ([42765, 42769, 42773], [10502, 10506, 10510],
+                    [61993, 62000, 62007], [100, 101, 102]):
+            with self.subTest(ids=ids):
+                self.assertEqual(
+                    utils.vis._classify_ipid_pattern(self._pkts(ids)),
+                    "sequential")
+
+    def test_large_jumps_are_still_random(self):
+        self.assertEqual(
+            utils.vis._classify_ipid_pattern(self._pkts([54321, 12345, 33333])),
+            "random")
+
+    def test_decreasing_is_random(self):
+        """A backwards step is not a monotonic counter."""
+        self.assertEqual(
+            utils.vis._classify_ipid_pattern(self._pkts([500, 400, 300])),
+            "random")
+
+    def test_wraparound_is_sequential(self):
+        """A 16-bit counter rolling over is an increment, not a -65532 jump."""
+        self.assertEqual(
+            utils.vis._classify_ipid_pattern(self._pkts([65530, 65534, 2, 6])),
+            "sequential")
+
+    def test_boundary_delta_is_sequential(self):
+        base = 1000
+        ids = [base, base + utils.vis.IPID_SEQUENTIAL_MAX_DELTA]
+        self.assertEqual(
+            utils.vis._classify_ipid_pattern(self._pkts(ids)), "sequential")
+
+    def test_just_over_boundary_is_random(self):
+        base = 1000
+        ids = [base, base + utils.vis.IPID_SEQUENTIAL_MAX_DELTA + 1]
+        self.assertEqual(
+            utils.vis._classify_ipid_pattern(self._pkts(ids)), "random")
+
+
+class TestIpIdZeroHandling(unittest.TestCase):
+    """The constant test filtered zeros while the delta test did not."""
+
+    def _pkts(self, ids):
+        return [{"IP": {"id": str(i)}} for i in ids]
+
+    def test_zero_mixed_with_repeats_is_not_constant(self):
+        """[0, 5, 5] is not a constant IP-ID; the old code said it was."""
+        self.assertNotEqual(
+            utils.vis._classify_ipid_pattern(self._pkts([0, 5, 5])),
+            "constant")
+
+    def test_all_zero_is_constant(self):
+        """A host that always sends ID 0 (DF set) is genuinely constant."""
+        self.assertEqual(
+            utils.vis._classify_ipid_pattern(self._pkts([0, 0, 0])),
+            "constant")
+
+    def test_identical_nonzero_is_constant(self):
+        self.assertEqual(
+            utils.vis._classify_ipid_pattern(self._pkts([777, 777, 777])),
+            "constant")
+
+    def test_single_packet_is_unknown(self):
+        self.assertEqual(
+            utils.vis._classify_ipid_pattern(self._pkts([1])), "unknown")
+
+    def test_unparseable_ids_are_skipped(self):
+        self.assertEqual(
+            utils.vis._classify_ipid_pattern(
+                [{"IP": {"id": "not-a-number"}}, {"IP": {"id": "5"}}]),
+            "unknown")
+
+
+class TestIpIdAggregationLevel(unittest.TestCase):
+    """IP-ID entropy is a property of the responder, not of one probe.
+
+    tracevis records each repeat probe as its own result carrying at most one
+    received packet, so classifying inside a single result left ~99% of hops
+    at "unknown".
+    """
+
+    def _hop_results(self):
+        return [
+            {"from": "10.0.0.5",
+             "packets": {"sent": {}, "received": [{"IP": {"id": "100"}}]}},
+            {"from": "10.0.0.5",
+             "packets": {"sent": {}, "received": [{"IP": {"id": "104"}}]}},
+            {"from": "10.0.0.5",
+             "packets": {"sent": {}, "received": [{"IP": {"id": "108"}}]}},
+            {"from": "10.0.0.9",
+             "packets": {"sent": {}, "received": [{"IP": {"id": "7"}}]}},
+            {"from": "***"},
+        ]
+
+    def test_collect_groups_by_responder(self):
+        grouped = utils.vis.collect_hop_ipid_packets(self._hop_results())
+        self.assertEqual(sorted(grouped), ["10.0.0.5", "10.0.0.9"])
+        self.assertEqual(len(grouped["10.0.0.5"]), 3)
+        self.assertEqual(len(grouped["10.0.0.9"]), 1)
+
+    def test_star_hops_excluded(self):
+        self.assertNotIn("***",
+                         utils.vis.collect_hop_ipid_packets(self._hop_results()))
+
+    def test_single_result_alone_cannot_classify(self):
+        """One probe's received list has one packet — not enough."""
+        single = self._hop_results()[0]["packets"]["received"]
+        self.assertEqual(utils.vis._classify_ipid_pattern(single), "unknown")
+
+    def test_aggregated_across_repeats_classifies(self):
+        grouped = utils.vis.collect_hop_ipid_packets(self._hop_results())
+        fp = utils.vis.fingerprint_middlebox(
+            {}, self._hop_results()[0]["packets"]["received"],
+            ipid_packets=grouped["10.0.0.5"])
+        self.assertEqual(fp.ipid_pattern, "sequential")
+
+    def test_ipid_packets_defaults_to_received(self):
+        """Omitting the argument keeps the original single-probe behaviour."""
+        fp = utils.vis.fingerprint_middlebox(
+            {}, [{"IP": {"id": "1"}}, {"IP": {"id": "2"}}])
+        self.assertEqual(fp.ipid_pattern, "sequential")
+
+
+class TestTimestampOptionSpelling(unittest.TestCase):
+    """`name.upper() == "Timestamp"` could never be true."""
+
+    def test_ts_spelling(self):
+        self.assertTrue(utils.vis._has_timestamp_option([("TS", "0:1")]))
+
+    def test_timestamp_spelling(self):
+        self.assertTrue(
+            utils.vis._has_timestamp_option([("Timestamp", "0:1")]))
+
+    def test_lowercase_spelling(self):
+        self.assertTrue(utils.vis._has_timestamp_option([("ts", "0:1")]))
+
+    def test_absent(self):
+        self.assertFalse(utils.vis._has_timestamp_option([("MSS", 1460)]))
+
+
+class TestMssClampValue(unittest.TestCase):
+    """MSS_CLAMP_VALUES was defined with a documented purpose and never used."""
+
+    def test_clamp_value_recorded(self):
+        fp = utils.vis.fingerprint_middlebox(
+            {"TCP": {"options": "[('MSS', 1460)]"}},
+            [{"TCP": {"options": "[('MSS', 1380)]"}}])
+        self.assertTrue(fp.mss_clamped)
+        self.assertEqual(fp.mss_clamp_value, 1380)
+        self.assertIn(fp.mss_clamp_value, utils.vis.MSS_CLAMP_VALUES)
+
+    def test_unrecognised_clamp_value_still_reported(self):
+        fp = utils.vis.fingerprint_middlebox(
+            {"TCP": {"options": "[('MSS', 1460)]"}},
+            [{"TCP": {"options": "[('MSS', 1111)]"}}])
+        self.assertTrue(fp.mss_clamped)
+        self.assertEqual(fp.mss_clamp_value, 1111)
+        self.assertNotIn(fp.mss_clamp_value, utils.vis.MSS_CLAMP_VALUES)
+
+    def test_no_clamp_leaves_value_none(self):
+        fp = utils.vis.fingerprint_middlebox(
+            {"TCP": {"options": "[('MSS', 1380)]"}},
+            [{"TCP": {"options": "[('MSS', 1460)]"}}])
+        self.assertFalse(fp.mss_clamped)
+        self.assertIsNone(fp.mss_clamp_value)
+
+    def test_well_known_clamp_named_in_tooltip(self):
+        fp = utils.vis.fingerprint_middlebox(
+            {"TCP": {"options": "[('MSS', 1460)]"}},
+            [{"TCP": {"options": "[('MSS', 1380)]"}}])
+        tooltip = utils.vis.tooltips_append_lines(
+            False, False, False, "TCP", "SA", fingerprint=fp)
+        self.assertIn("MSS clamped", tooltip)
+        self.assertIn("1380", tooltip)
+        self.assertIn("well-known clamp", tooltip)
+
+    def test_arbitrary_clamp_not_called_well_known(self):
+        fp = utils.vis.fingerprint_middlebox(
+            {"TCP": {"options": "[('MSS', 1460)]"}},
+            [{"TCP": {"options": "[('MSS', 1111)]"}}])
+        tooltip = utils.vis.tooltips_append_lines(
+            False, False, False, "TCP", "SA", fingerprint=fp)
+        self.assertIn("1111", tooltip)
+        self.assertNotIn("well-known clamp", tooltip)
+
+    def test_empty_fingerprint_is_the_shared_sentinel(self):
+        self.assertIs(utils.vis.fingerprint_middlebox({}, []),
+                      utils.vis.NO_FINGERPRINT)
+
+
+class TestVpConvergenceGroupsByDestination(unittest.TestCase):
+    """The function pooled every measurement regardless of destination.
+
+    A multi-VP capture holds one measurement per (VP x destination), and
+    tracevis's core workflow compares an accessible and a blocked destination
+    in one run. The differing final hops broke the suffix walk immediately, so
+    every real multi-destination capture produced an empty set and --reverse-
+    path rendered a legend over nothing.
+    """
+
+    def _vp(self, src, hops, dst, vp=None, repeats=1):
+        result = [{"hop": i + 1,
+                   "result": [{"from": ip} for _ in range(repeats)]}
+                  for i, ip in enumerate(hops)]
+        base = {"src_addr": src, "dst_addr": dst, "result": result}
+        if vp:
+            base["vp"] = vp
+        return base
+
+    def test_two_destinations_no_longer_collapse_to_empty(self):
+        measurements = [
+            self._vp("10.0.0.1", ["1.1.1.1", "9.9.9.9"], "8.8.4.4", vp="1"),
+            self._vp("10.0.0.2", ["2.2.2.2", "9.9.9.9"], "8.8.4.4", vp="2"),
+            self._vp("10.0.0.1", ["1.1.1.1", "7.7.7.7"], "8.8.8.8", vp="1"),
+            self._vp("10.0.0.2", ["2.2.2.2", "7.7.7.7"], "8.8.8.8", vp="2"),
+        ]
+        result = utils.vis._find_vp_convergence(measurements)
+        self.assertEqual(
+            result, {"9.9.9.9", "8.8.4.4", "7.7.7.7", "8.8.8.8"})
+
+    def test_single_destination_still_works(self):
+        measurements = [
+            self._vp("10.0.0.1", ["1.1.1.1", "9.9.9.9"], "8.8.4.4", vp="1"),
+            self._vp("10.0.0.2", ["2.2.2.2", "9.9.9.9"], "8.8.4.4", vp="2"),
+        ]
+        self.assertEqual(utils.vis._find_vp_convergence(measurements),
+                         {"9.9.9.9", "8.8.4.4"})
+
+    def test_same_vp_traced_twice_is_not_convergence(self):
+        """Two runs from one VP share their whole path by construction."""
+        one = self._vp("10.0.0.1", ["1.1.1.1", "9.9.9.9"], "8.8.4.4", vp="1")
+        self.assertEqual(
+            utils.vis._find_vp_convergence([one, dict(one)]), set())
+
+    def test_distinct_sources_count_as_distinct_vps(self):
+        """A local multi-source capture has no `vp` key; fall back to src."""
+        measurements = [
+            self._vp("10.0.0.1", ["1.1.1.1", "9.9.9.9"], "8.8.4.4"),
+            self._vp("10.0.0.2", ["2.2.2.2", "9.9.9.9"], "8.8.4.4"),
+        ]
+        self.assertIn("9.9.9.9", utils.vis._find_vp_convergence(measurements))
+
+    def test_unequal_probe_counts_do_not_misalign(self):
+        """A lost probe changed one VP's list length in the old flat-list form."""
+        measurements = [
+            self._vp("10.0.0.1", ["1.1.1.1", "9.9.9.9"], "8.8.4.4",
+                     vp="1", repeats=3),
+            self._vp("10.0.0.2", ["2.2.2.2", "9.9.9.9"], "8.8.4.4",
+                     vp="2", repeats=2),
+        ]
+        self.assertEqual(utils.vis._find_vp_convergence(measurements),
+                         {"9.9.9.9", "8.8.4.4"})
+
+    def test_no_shared_suffix_returns_only_shared_destination(self):
+        measurements = [
+            self._vp("10.0.0.1", ["1.1.1.1", "3.3.3.3"], "8.8.4.4", vp="1"),
+            self._vp("10.0.0.2", ["2.2.2.2", "4.4.4.4"], "8.8.4.4", vp="2"),
+        ]
+        self.assertEqual(utils.vis._find_vp_convergence(measurements),
+                         {"8.8.4.4"})
+
+    def test_empty_input(self):
+        self.assertEqual(utils.vis._find_vp_convergence([]), set())
+
+
+class TestVpConvergenceLabelNormalisation(unittest.TestCase):
+    """The set held the raw dst_addr while graph nodes hold the resolved IP."""
+
+    def test_hostname_destination_is_resolved(self):
+        def fake_resolve(addr):
+            return "93.184.216.34" if addr == "example.com" else addr
+
+        measurements = [
+            {"src_addr": "10.0.0.1", "dst_addr": "example.com", "vp": "1",
+             "result": [{"hop": 1, "result": [{"from": "1.1.1.1"}]}]},
+            {"src_addr": "10.0.0.2", "dst_addr": "example.com", "vp": "2",
+             "result": [{"hop": 1, "result": [{"from": "2.2.2.2"}]}]},
+        ]
+        with unittest.mock.patch.object(utils.vis, "resolve_or_ip",
+                                        side_effect=fake_resolve):
+            result = utils.vis._find_vp_convergence(measurements)
+        self.assertEqual(result, {"93.184.216.34"})
+        self.assertNotIn("example.com", result)
+
+
+class TestOfflineAssetEscalation(unittest.TestCase):
+    """GitHub issue #75 redefined no_internet and broke the CDN fallback.
+
+    template_main.html.jinja links vis.js from cdnjs.cloudflare.com. A
+    DNS-hijacked shutdown now reports no_internet=False, so tracevis stopped
+    forcing self-contained output on exactly the network that cannot reach a
+    CDN. The decision is made from the recorded network_state instead.
+    """
+
+    def test_shutdown_needs_offline_assets(self):
+        self.assertTrue(
+            utils.vis.needs_offline_assets([{"network_state": "shutdown"}]))
+
+    def test_allowlisted_needs_offline_assets(self):
+        self.assertTrue(
+            utils.vis.needs_offline_assets([{"network_state": "allowlisted"}]))
+
+    def test_open_does_not(self):
+        self.assertFalse(
+            utils.vis.needs_offline_assets([{"network_state": "open"}]))
+
+    def test_unknown_does_not(self):
+        self.assertFalse(
+            utils.vis.needs_offline_assets([{"network_state": "unknown"}]))
+
+    def test_missing_state_does_not(self):
+        self.assertFalse(utils.vis.needs_offline_assets([{}]))
+
+    def test_any_censored_measurement_escalates(self):
+        self.assertTrue(utils.vis.needs_offline_assets(
+            [{"network_state": "open"}, {"network_state": "shutdown"}]))
+
+    def test_observed_states_reported(self):
+        self.assertEqual(
+            utils.vis.observed_censored_states(
+                [{"network_state": "shutdown"},
+                 {"network_state": "allowlisted"},
+                 {"network_state": "open"}]),
+            {"shutdown", "allowlisted"})
+
+
+class TestOfflineAssetEscalationEndToEnd(unittest.TestCase):
+    """The escalated page must actually be self-contained."""
+
+    def _render(self, state):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: [os.remove(os.path.join(directory, n))
+                     for n in os.listdir(directory)] and None
+            or os.rmdir(directory))
+        path = os.path.join(directory, "m.json")
+        with open(path, "w") as handle:
+            json.dump([make_measurement(network_state=state)], handle)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            utils.vis.vis(measurement_path=path, attach_jscss=False,
+                          edge_lable="none")
+        with open(path.replace(".json", ".html"), errors="replace") as handle:
+            return handle.read(), buf.getvalue()
+
+    @staticmethod
+    def _live_external_refs(page):
+        """External refs, ignoring the ones the offline template comments out."""
+        stripped = re.sub(r"<!--.*?-->", "", page, flags=re.DOTALL)
+        return re.findall(r'(?:src|href)="(https?://[^"]+)"', stripped)
+
+    def test_shutdown_page_has_no_external_refs(self):
+        page, log = self._render("shutdown")
+        self.assertEqual(self._live_external_refs(page), [])
+        self.assertIn("embedding JS/CSS", log)
+
+    def test_allowlisted_page_has_no_external_refs(self):
+        page, _ = self._render("allowlisted")
+        self.assertEqual(self._live_external_refs(page), [])
+
+    def test_open_page_still_uses_the_cdn_template(self):
+        page, log = self._render("open")
+        self.assertNotEqual(self._live_external_refs(page), [])
+        self.assertNotIn("embedding JS/CSS", log)
+
+
+class TestReversePathLegendHonesty(VisFixtureMixin, unittest.TestCase):
+    """The legend must not appear when no edge carries the marking."""
+
+    def _vp(self, src, hops, dst="1.1.1.1", vp=None):
+        result = [{"hop": i + 1, "result": [{"from": ip, "ttl": 64}]}
+                  for i, ip in enumerate(hops)]
+        base = {**make_measurement(dst_addr=dst, src_addr=src),
+                "src_addr": src, "dst_addr": dst, "result": result}
+        if vp:
+            base["vp"] = vp
+        return base
+
+    def test_no_legend_when_only_one_vp(self):
+        page = self.render([self._vp("10.0.0.1", ["100.64.0.1", "1.1.1.1"])],
+                           reverse_path=True, edge_lable="none")
+        self.assertNotIn("reverse-path-legend", page)
+
+    def test_legend_when_two_vps_converge(self):
+        page = self.render(
+            [self._vp("10.0.0.1", ["100.64.0.1", "1.1.1.1"], vp="1"),
+             self._vp("10.0.0.2", ["192.168.1.1", "1.1.1.1"], vp="2")],
+            reverse_path=True, edge_lable="none")
+        self.assertIn("reverse-path-legend", page)
+
+
+class TestEdgeHighlightScript(VisFixtureMixin, unittest.TestCase):
+    """GitHub issue #2: the injected walk must be loop-safe and reversible."""
+
+    def _page(self):
+        return self.render([make_measurement()], highlight_selected=True,
+                           edge_lable="none")
+
+    def test_walk_has_a_visited_set(self):
+        """Without one, a routing loop spins forever and hangs the tab."""
+        self.assertIn("seenEdges", self._page())
+
+    def test_original_colours_are_saved_before_painting(self):
+        page = self._page()
+        self.assertIn("savedEdgeColors", page)
+        self.assertIn("savedNodeColors", page)
+
+    def test_clear_does_not_blank_colours(self):
+        """`color: undefined` dropped elements to the vis.js default."""
+        page = self._page()
+        self.assertNotIn("color: undefined", page)
+
+    def test_not_injected_without_the_flag(self):
+        page = self.render([make_measurement()], edge_lable="none")
+        self.assertNotIn("highlightPathToEdge", page)
