@@ -1276,3 +1276,10 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
                            reverse_path=reverse_path,
                            reverse_path_ips=reverse_path_ips)
     print("· · · - · -     · · · - · -     · · · - · -     · · · - · -")
+    # `tracevis.py` has always read this as a success flag
+    # (`if utils.vis.vis(...): print("finished.")`), but the function returned
+    # None, so the branch was dead and a completed render said nothing. It
+    # matters now beyond the missing line: --monitor decides whether a run
+    # counted, and inferring that from a falsy return would mark every
+    # successful run as failed.
+    return True

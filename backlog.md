@@ -6,9 +6,9 @@ Each item is an atomic, testable unit of work. Risk is estimated as
 > Legend: Priority = P0/P1/P2/P3.
 
 **Status at a glance.** Done: 1.1, 1.2, 1.3, 1.5, 1.6, 1.7, 1.8,
-1.9, 2.0, 2.2, 2.3, 2.4, 2.5, 2.6, 2.8, 2.9, 2.11, 2.12, issue #68,
+1.9, 2.0, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 2.11, 2.12, issue #68,
 issue #69. Needs rescoping before it can be scheduled: 1.4. Genuinely
-open: 2.1, 2.7, 2.10.
+open: 2.1 (IPv6), 2.10 (needs an endpoint the operator controls).
 
 **The roadmap is complete as of M6c; everything still open lives here.**
 
@@ -52,7 +52,7 @@ open: 2.1, 2.7, 2.10.
 
 | ID | Task | Why | Risk | Depends on |
 |----|------|-----|------|------------|
-| 2.7 | Continuous `--monitor` mode | Filtering behaviour evolves quickly, so a single run dates fast; repeated tracking is what makes a trend visible. | M | 1.2 |
+| 2.7 | ~~Continuous `--monitor` mode~~ **DONE** | `--monitor` / `--monitor-interval` / `--monitor-runs` repeat the trace and close with a trend: per-destination reachability, network state, and the DPI/CGNAT/RST signals compared across runs. Each run is rendered as it completes, so an interrupt still leaves usable graphs. A failing run is recorded and the loop continues — a trace failing on a hostile network is a data point, not a reason to stop watching. **Fixed first, because the mode triggers it:** measurement names are stamped to the minute and nothing checked the name was free, so two runs inside the same minute wrote the same path and the second silently destroyed the first, both printing the same `saved:` line. Now an exclusive (`"x"`) create with a counting suffix, so the first run keeps its existing name and only the colliding path differs. | M | 1.2 |
 | 2.8 | ~~`--anonymize` output + secure-by-default~~ **DONE (M6a)** | Raw packet captures land on disk and carry the operator's own network. Split by cost: the operator's own address is removed unconditionally (it has none — `send_packet` overwrites `IP.src` on every probe), while private-hop pseudonymisation is opt-in because hop addresses are the measurement. CGNAT hops survive the flag so `cgnat_hop` keeps working. Also closed the leak chain into `samples/`: the config dump wrote the packet as held. | L | — |
 | 2.9 | ~~Drop IPython hard-dep in `from_scapy`~~ **DONE (M6c)** | A hard dependency may be absent in a restricted environment. It was never in `requirements.txt`, but the stdlib `code.interact` fallback sat after an unconditional `raise NotImplementedError` and so was unreachable. Also fixed while there: the prompt's namespace was the reader's own `locals()` (so the banner's `IP(...)/TCP()` raised NameError), and a bare `except:` reported every in-session error — including forgetting to assign `p` — as IPython being absent. | L | — |
 

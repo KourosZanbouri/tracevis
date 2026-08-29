@@ -290,6 +290,44 @@ flags change what it shows and how it is drawn.
   CGNAT downstream of the first still reads as a boundary.
 - `-a` / `--attach` — embed the JS/CSS in the page instead of linking a CDN.
 
+### Continuous monitoring
+
+Filtering behaviour changes faster than a single measurement stays true, so one
+capture dates quickly. `--monitor` repeats the trace on an interval and closes
+with a report of what moved between runs:
+
+```
+python3 ./tracevis.py --dns --monitor --monitor-interval 600 --monitor-runs 12
+```
+
+- `--monitor` — repeat the trace. Applies to **live traces only**; `-f`,
+  `--ripe` and `--vps` read a capture that already exists, so there is nothing
+  to repeat. Combine it with a trace mode (`--dns`, `--sni-test`, `--packet`).
+- `--monitor-interval` — seconds between runs (default 300).
+- `--monitor-runs` — how many runs to make; `0` (the default) runs until you
+  interrupt it.
+
+Each run is traced and rendered as it completes, so interrupting the session
+still leaves a usable graph for everything already measured. A run that fails
+is reported and the loop carries on — a trace failing on a hostile network is a
+data point about that network, not a reason to stop watching it.
+
+The closing report gives per-destination reachability across runs (`·` reached,
+`x` unreachable, `-` not probed), the network state at each run, and any
+DPI/CGNAT/RST signal that changed. It is printed and written to
+`monitor-trend.txt` beside the captures. Destination arms are kept apart, so a
+control and its treatment against the same address stay separate lines rather
+than averaging into one.
+
+```
+monitor trend over 2 run(s)
+  network state: allowlisted → allowlisted
+
+  reachability (· reached, x unreachable, - not probed)
+    1.1.1.1 [www.example.com]  x·   REACHABILITY CHANGED
+    8.8.8.8 [www.example.com]  x·   REACHABILITY CHANGED
+```
+
 ### Offline pages on censored networks
 
 The default vis.js template loads `vis.js` and `vis.css` from

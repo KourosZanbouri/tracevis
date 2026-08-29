@@ -5,6 +5,72 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (data loss — measurement files could silently overwrite each other)
+- **`utils/trace.py` never checked whether a measurement filename was free.**
+  Names are stamped to the minute (`%Y%m%d-%H%M`), so two runs inside the same
+  minute derived the same path and the second destroyed the first. Both runs
+  printed the same `saved:` line, so nothing about the output revealed that a
+  capture had been lost.
+
+  Found while building `--monitor`, which makes same-minute runs ordinary
+  rather than accidental, and fixed before the loop existed rather than after.
+  Reproduced first: four runs stamped to the same minute left one file on disk
+  holding only the last one's data.
+
+  The fix creates the file exclusively (`open(..., "x")`) and counts up a
+  suffix on collision, so the first run keeps exactly the name it has always
+  had and only the colliding path behaves differently. Exclusive creation
+  rather than a check-then-open: the check would leave the very race it exists
+  to close.
+
+### Added (backlog §2.7 — continuous monitoring)
+- **New module `utils/monitor.py`** and `--monitor` / `--monitor-interval`
+  (default 300s) / `--monitor-runs` (`0` = until interrupted). A single capture
+  dates quickly on a network whose filtering changes; the mode repeats the
+  trace and reports what moved between runs.
+- Split into three layers so the interesting one is testable: `run_monitor`
+  (scheduling and run accounting, with the clock and the sleep injected),
+  `summarise_measurement` (one capture → per-destination posture), and
+  `build_trend` / `format_trend` (the comparison). The whole loop is tested
+  without sleeping and without tracing.
+- **A failing run is recorded and the loop continues.** A trace failing on a
+  hostile network is a data point about the network, not a reason to stop
+  watching it. Only `KeyboardInterrupt` stops the session, and it keeps every
+  run already completed — each run is rendered as it finishes, so an interrupt
+  still leaves usable graphs.
+- The trend reports per-destination reachability across runs, the network state
+  at each run, and any DPI/CGNAT/RST signal that changed; it is printed and
+  written to `monitor-trend.txt`. Destination *arms* are kept apart
+  (`1.1.1.1 [control]` vs `1.1.1.1 [treatment]`) — collapsing on `dst_addr`
+  would average a control with its treatment into one meaningless line.
+- "Reached" means the destination address actually answered, not that the
+  trace ran to completion: a path that dies at hop 4 still produces a full run
+  of star hops.
+
+### Fixed (`utils.vis.vis()` never signalled success)
+- The function had no `return`, so `if utils.vis.vis(...)` in `tracevis.py` was
+  always falsy and a completed render printed no `finished.`. Pre-existing —
+  reproduced at `v1.1.0` — and cosmetic until now: `--monitor` decides whether
+  a run counted, and a falsy return would have marked every successful run as
+  failed.
+
+### Notes (§2.7)
+- Validated against a real series rather than only synthetic data. Two captures
+  in `tracevis_data_res_after/` are the same configuration six minutes apart on
+  an allowlisted network, and the trend reports a reachability change between
+  them. Checked against the raw JSON: at 21:35 nothing answered from `1.1.1.1`
+  and the path died at `172.16.4.43`; at 21:41 `1.1.1.1` answered. The
+  detection is a true positive, not an artefact of the summariser.
+- Nine defects were re-injected to confirm the tests catch them, including the
+  restored overwrite bug. All nine were caught.
+- One defect was found by validation rather than by review: `run_monitor` took
+  `sleeper=time.sleep` as a **default argument**, which binds at import, so
+  `mock.patch` on `time.sleep` was silently ignored and a supposedly-stubbed
+  test slept out the real 60-second interval. Both are now resolved at call
+  time. The regression test uses a 1-second interval on purpose — the
+  assertion that catches the defect is the call count, and a large interval
+  would make the failing case hang instead of report.
+
 ### Added (backlog §2.4 — the allowlisted-tier node band)
 - **`mark_allowlisted_tier()` in `utils/vis.py`** flags every node in the
   downstream cone of a CGNAT hop. §2.3 shipped the boundary itself (a teal

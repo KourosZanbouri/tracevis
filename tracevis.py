@@ -14,6 +14,7 @@ import utils.csv
 import utils.dns
 import utils.iface
 import utils.ioda
+import utils.monitor
 import utils.packet_input
 import utils.portpool
 import utils.ripe_atlas
@@ -255,6 +256,19 @@ def get_args(sys_args, auto_exit=True):
                         "(GitHub issue #44; needs a measurement holding the "
                         "same destination from 2+ vantage points, via --vps "
                         "or several -f files)")
+    parser.add_argument('--monitor', dest='monitor', action='store_true',
+                        help="repeat the trace on an interval and report what "
+                             "changed between runs (backlog 2.7). Applies to "
+                             "live traces only; -f/--ripe/--vps read a "
+                             "capture that already exists.")
+    parser.add_argument('--monitor-interval', dest='monitor_interval', type=int,
+                        default=utils.monitor.DEFAULT_INTERVAL,
+                        help="seconds between monitored runs "
+                             f"(default: {utils.monitor.DEFAULT_INTERVAL})")
+    parser.add_argument('--monitor-runs', dest='monitor_runs', type=int,
+                        default=0,
+                        help="how many monitored runs to make; 0 (the default) "
+                             "runs until interrupted")
     parser.add_argument('--ipv4', dest='ipv4', action='store_true',
                         help="require every probe target to be IPv4, and stop "
                              "before probing if one is not. tracevis is "
@@ -278,6 +292,70 @@ change the behavior of the trace route
     args = parser.parse_args(sys_args)
     args_dict = process_input_args(args, parser)
     return args_dict
+
+
+def render_measurement(args, measurement_path, attach_jscss, edge_lable,
+                       input_packet):
+    """Dump the run's config beside its capture and render the graph.
+
+    Extracted so the monitored loop renders each run exactly the way a
+    one-shot run does, rather than growing a second, drifting copy.
+    """
+    if not args.get("file"):
+        config_dump_file_name = f"{os.path.splitext(measurement_path)[0]}.conf"
+        dump_args_to_file(config_dump_file_name, args, input_packet)
+    return utils.vis.vis(
+        measurement_path=measurement_path, attach_jscss=attach_jscss,
+        edge_lable=edge_lable,
+        phase_overlay=bool(args.get("phase_overlay")),
+        highlight_selected=bool(args.get("highlight_selected")),
+        renderer=args.get("renderer", "visjs"),
+        reverse_path=bool(args.get("reverse_path")))
+
+
+def run_monitored_session(args, trace_kwargs, edge_lable, input_packet,
+                          output_dir):
+    """Backlog §2.7: trace on an interval and report what moved between runs.
+
+    Each run is traced and rendered as it completes, so an interrupted session
+    still leaves a usable graph for everything already measured. The trend is
+    printed at the end and written beside the captures.
+    """
+    interval = int(args.get("monitor_interval") or utils.monitor.DEFAULT_INTERVAL)
+    runs = int(args.get("monitor_runs") or 0)
+    print(f"· · · - · monitor: every {interval}s, "
+          + (f"{runs} run(s)" if runs else "until interrupted"))
+
+    def one_run():
+        was_successful, measurement_path, no_internet = utils.trace.trace_route(
+            **trace_kwargs)
+        if not was_successful:
+            return None
+        render_measurement(args, measurement_path, bool(no_internet),
+                           edge_lable, input_packet)
+        return measurement_path
+
+    records = utils.monitor.run_monitor(one_run, runs=runs, interval=interval)
+    paths = [record.path for record in records if record.ok and record.path]
+    failed = [record for record in records if not record.ok]
+    if failed:
+        print(f"· · · - · monitor: {len(failed)} of {len(records)} run(s) failed")
+    if len(paths) < 2:
+        print("· · · - · monitor: fewer than two completed runs; "
+              "nothing to compare")
+        return records
+    summaries = [utils.monitor.summarise_measurement(path) for path in paths]
+    report = utils.monitor.format_trend(utils.monitor.build_trend(summaries))
+    print()
+    print(report)
+    trend_path = os.path.join(output_dir, "monitor-trend.txt")
+    try:
+        with open(trend_path, "w", encoding="utf-8") as handle:
+            handle.write(report + "\n")
+        print("saved: " + trend_path)
+    except OSError as exc:
+        print(f"· · · - · monitor: could not write the trend: {exc}")
+    return records
 
 
 def main(args):
@@ -469,19 +547,31 @@ def main(args):
             if args.get("packet") or args.get("rexmit"):
                 with input_packet as ctx:
                     packet_1, packet_2, do_tcph1, do_tcph2 = ctx
+            trace_kwargs = {
+                "ip_list": request_ips, "request_packet_1": packet_1,
+                "output_dir": output_dir, "max_ttl": max_ttl,
+                "timeout": timeout, "repeat_requests": repeat_requests,
+                "request_packet_2": packet_2, "name_prefix": name_prefix,
+                "annotation_1": annotation_1, "annotation_2": annotation_2,
+                "continue_to_max_ttl": continue_to_max_ttl,
+                "do_tcph1": do_tcph1, "do_tcph2": do_tcph2,
+                "trace_retransmission": trace_retransmission,
+                "trace_with_retransmission": trace_with_retransmission,
+                "iface": iface, "dst_port": dst_port,
+                "network_mode": network_mode, "port_pool": port_pool_ports,
+                "adaptive_timeout": bool(args.get("adaptive_timeout")),
+                "anonymize": bool(args.get("anonymize")),
+            }
+            if args.get("monitor"):
+                # Backlog §2.7. Returns instead of falling through: a monitored
+                # session renders each run as it completes and closes with the
+                # trend, so there is no single measurement left for the
+                # one-shot path below to render.
+                run_monitored_session(args, trace_kwargs, edge_lable,
+                                      input_packet, output_dir)
+                return
             was_successful, measurement_path, no_internet = utils.trace.trace_route(
-                ip_list=request_ips, request_packet_1=packet_1, output_dir=output_dir,
-                max_ttl=max_ttl, timeout=timeout, repeat_requests=repeat_requests,
-                request_packet_2=packet_2, name_prefix=name_prefix,
-                annotation_1=annotation_1, annotation_2=annotation_2,
-                continue_to_max_ttl=continue_to_max_ttl,
-                do_tcph1=do_tcph1, do_tcph2=do_tcph2,
-                trace_retransmission=trace_retransmission,
-                trace_with_retransmission=trace_with_retransmission, iface=iface,
-                dst_port=dst_port, network_mode=network_mode,
-                port_pool=port_pool_ports,
-                adaptive_timeout=bool(args.get("adaptive_timeout")),
-                anonymize=bool(args.get("anonymize")))
+                **trace_kwargs)
         except KeyboardInterrupt:
             # Don't let Ctrl-C silently discard an in-progress trace: flush
             # whatever partial hops were collected so the user keeps the graph.
@@ -554,18 +644,9 @@ def main(args):
             utils.csv.json2csv(measurement_path, False)
         else:
             was_successful = True
-    if was_successful:
-        if not args.get("file"):
-            config_dump_file_name = f"{os.path.splitext(measurement_path)[0]}.conf"
-            dump_args_to_file(config_dump_file_name, args, input_packet)
-        if utils.vis.vis(
-                measurement_path=measurement_path, attach_jscss=attach_jscss,
-                edge_lable=edge_lable,
-                phase_overlay=bool(args.get("phase_overlay")),
-                highlight_selected=bool(args.get("highlight_selected")),
-                renderer=args.get("renderer", "visjs"),
-                reverse_path=bool(args.get("reverse_path"))):
-            print("finished.")
+    if was_successful and render_measurement(
+            args, measurement_path, attach_jscss, edge_lable, input_packet):
+        print("finished.")
 
 
 if __name__ == "__main__":

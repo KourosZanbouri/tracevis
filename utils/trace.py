@@ -2,6 +2,7 @@
 from __future__ import absolute_import, unicode_literals
 
 import json
+import os
 import platform
 import sys
 import time
@@ -685,12 +686,42 @@ class Tracer:
                     measurement_data_save[1][ip_steps].clean_extra_result()
                 measurement_data_json.append(measurement_data_save[1][ip_steps])
             ip_steps += 1
-        data_path = output_dir + measurement_name + ".json"
-        with open(data_path, "w") as jsonfile:
+        jsonfile, data_path = self._open_new_measurement_file(
+            output_dir + measurement_name + ".json")
+        with jsonfile:
             jsonfile.write(json.dumps(measurement_data_json,
                            default=lambda o: o.__dict__, indent=4))
         print("saved: " + data_path)
         return data_path
+
+    @staticmethod
+    def _open_new_measurement_file(data_path):
+        """Open a measurement file for writing without ever clobbering one.
+
+        Measurement names are stamped to the minute
+        (``%Y%m%d-%H%M``) and nothing checked whether the name was already
+        taken, so two runs inside the same minute wrote to the same path and
+        the second silently destroyed the first. Both printed the same
+        "saved:" line, so the loss left no trace at all. That is the ordinary
+        case under ``--monitor``, which is why it is fixed before the loop
+        exists rather than after.
+
+        A suffix is added rather than a finer timestamp so every filename the
+        tool already produces is unchanged, and only the colliding path
+        behaves differently. Creation is exclusive (``"x"``), so two processes
+        racing for the same name cannot both believe they won it -- a check
+        followed by an open would leave exactly the gap this exists to close.
+
+        Returns the open handle and the path it actually claimed.
+        """
+        stem, ext = os.path.splitext(data_path)
+        candidate, counter = data_path, 1
+        while True:
+            try:
+                return open(candidate, "x", encoding="utf-8"), candidate
+            except FileExistsError:
+                counter += 1
+                candidate = f"{stem}-{counter}{ext}"
 
     def finalise_measurements(self):
         """Run the post-trace analysis over whatever hops were collected.
