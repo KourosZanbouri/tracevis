@@ -125,10 +125,31 @@ Scope: `--anonymize`, drop IPython hard-dep, CHANGELOG, README update, release.
   against a labelled capture holding both forged and genuine replies, and
   validated to zero false positives across every measurement available.
 
-**The roadmap is complete.** What remains is in `backlog.md`: 2.4 (node
-tint of allowlisted-tier nodes), 2.7 (`--monitor`), 2.1 (IPv6), 2.10 (needs a
-controlled endpoint), and 1.4 (needs rescope first). §2.2 (multi-VP + IODA)
-and §2.3 (CGNAT/allowlist node types + phase overlay) are shipped.
+**The roadmap is complete, and so is the backlog it handed off to.**
+§2.2 (multi-VP + IODA) and §2.3 (CGNAT/allowlist node types + phase overlay)
+shipped first; 2.4 (the allowlisted-tier node band), 2.7 (`--monitor`) and 1.4
+(rescoped into a middlebox reassembly probe — see
+`docs/rescope-1.4-reassembly.md`) followed, and 2.1 and 2.10 are as far as
+this environment can take them.
+
+**Nothing is left that code alone can finish.** Three items remain incomplete,
+each blocked on hardware or a network rather than on work:
+
+- **2.1 — probing over IPv6.** Rendering and analysing IPv6 measurements is
+  done. Probing is not: `utils/trace.py` builds every packet on scapy's `IP`
+  layer, `utils/ephemeral_port.py` binds `AF_INET`, and ICMPv6 time-exceeded
+  parsing does not exist. Needs a host with real IPv6 and root. Until then
+  IPv6 targets are refused before any packet is sent rather than failing as a
+  bare `gaierror` from inside scapy.
+- **2.10 — the UDP arm.** `--compare-arms` extracts what the captures already
+  prove, and recording the TCP handshake outcome means a re-run settles the
+  two TCP samples with no new endpoint. Separating an on-path drop from a
+  closed UDP port still needs a destination the operator controls that
+  answers UDP/51820.
+- **1.4 — validation.** The probe is built and unit-tested; it has never been
+  run against live DPI, because this environment has neither root nor a
+  censoring path. Every verdict is capped at *moderate* confidence and each
+  report says so.
 
 Five additional GitHub issues have been resolved on top of the roadmap:
 #75 (DNS resolution race condition), #47 (middlebox fingerprinting),
@@ -138,6 +159,15 @@ reviewed against the repository's own captures; see the "Fixed (review of the
 #2 / #44 / #47 / #64 / #75 work)" section of CHANGELOG.md for what that
 turned up and corrected. §2.2, §2.3 and issues #68/#69 were then reviewed the
 same way — see "Fixed (review of the §2.2 / §2.3 / #68 / #69 work)".
+
+Reviewing the later work the same way turned up three defects larger than the
+features that surfaced them, all now fixed and released in v1.3.0:
+`dpi_cleared` was computed with no term for whether the probe reached its
+destination (38 of 96 stored measurements claimed a clean path for a probe
+that never arrived); measurement files stamped to the minute silently
+overwrote each other, which `--monitor` would have made routine; and a hop
+that answered while carrying an empty `packets.received` — the shape RIPE
+Atlas data has — crashed the entire render with `UnboundLocalError`.
 
 ---
 

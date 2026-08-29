@@ -5,6 +5,22 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-08-29
+
+### Upgrade notes
+- **`dpi_cleared` values change.** It now requires evidence the probe reached
+  the destination. Measurements that previously reported `dpi_cleared=True`
+  about a probe that never arrived now report `False` — 38 of the 96
+  measurements in this repository's captures were in that state. This is a
+  correction, not a policy change, but anything consuming the field will see
+  different values for the same captures.
+- **`utils.vis.vis()` returns a bool**, where it previously returned `None`.
+  `tracevis.py` has always read it as a success flag; now it is one, and a
+  rejected capture exits 1.
+- Hop results gain an optional `handshake` boolean, written only when a TCP
+  handshake was attempted. Absent means "not tried", which is distinct from
+  "it failed".
+
 ### Fixed (a malformed capture left a traceback instead of a message)
 - **`vis()` dereferenced the capture's shape directly** — `json.load`, then
   `all_measurements[0]["src_addr"]` — so every malformed input reached the
