@@ -5,6 +5,52 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (a responding hop with no packet blobs crashed the whole render)
+- **`is_allowlist_boundary` was assigned only inside the branch that has
+  received packets to analyse, and read unconditionally below it.** A hop that
+  answered while carrying an empty `packets.received` — the shape RIPE Atlas
+  data and any capture written without packet blobs both have — reached that
+  read with the name unbound and took the entire render down with
+  `UnboundLocalError`.
+- Pre-existing and **not** family-specific: found while rendering an IPv6
+  capture, then reproduced identically on the IPv4 equivalent at HEAD.
+
+### Added (backlog §2.1 — IPv6 measurements render; probing still does not)
+- **The rendering and analysis half is now address-family agnostic.**
+  `utils/vis.py` gains `address_node_id`, which builds a node id for either
+  family and **folds the family into the id** — `::1` and `0.0.0.1` are both
+  the integer 1, so without that a dual-stack capture would draw two different
+  hops as one node. IPv4 ids are byte-identical to before (`1.1.1.1` is still
+  `x16843009x`), so existing graphs are unaffected.
+- `resolve_or_ip` now uses `getaddrinfo` rather than the IPv4-only
+  `gethostbyname`, which raised `gaierror` on a name with only a AAAA record
+  and fell through to the hostname. IPv4 is still preferred when a name has
+  both, so dual-stacked names resolve exactly as they did.
+- Unresolvable names no longer crash the render. The id builder raised
+  `AddressValueError` on anything that was not an address — GitHub issue #68's
+  crash in a different guise — and now falls back to the literal, keeping two
+  different unresolved names on two different nodes.
+- `traceroute_struct.address_family()` derives `af` from the destination
+  instead of the hardcoded `4` at every call site, so an IPv6 measurement no
+  longer describes itself as IPv4 in the field RIPE Atlas uses for exactly
+  that.
+
+### Not done (backlog §2.1 — probing over IPv6)
+- **Probing is still IPv4 only, and now says so before it fails.**
+  `utils/trace.py` builds every packet on scapy's `IP` layer (29 sites),
+  `utils/ephemeral_port.py` binds `AF_INET`, and ICMPv6 time-exceeded parsing
+  does not exist. Passing an IPv6 address to `IP(dst=...)` raises a bare
+  `gaierror` from inside scapy, well away from the target list that caused it.
+  `reject_ipv6_probe_targets` refuses such targets before any packet is sent
+  and points at what does work; `utils/packet_input.py`'s rejection message
+  now names the real reason instead of "it's not IPv4".
+- **Why it stops here rather than being half-built:** this environment has
+  zero global IPv6 addresses, none on loopback, and no root, so a live IPv6
+  trace cannot be run, let alone validated. Shipping a send path that cannot
+  be exercised is the same mistake §1.4's rescope exists to avoid, and it
+  would be harder to detect — a broken IPv6 trace looks exactly like a blocked
+  one, which is the failure mode this tool exists to distinguish.
+
 ### Added (backlog §1.4, rescoped — middlebox reassembly probe)
 - **Rescope written up in `docs/rescope-1.4-reassembly.md`.** The item as
   written — fragment a ClientHello so no packet holds a complete SNI — targets

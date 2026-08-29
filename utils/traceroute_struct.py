@@ -4,6 +4,22 @@ import json
 import utils.convert_packetlist
 
 
+def address_family(address, default=4):
+    """RIPE Atlas `af`: 4 or 6, taken from the address itself.
+
+    The field was hardcoded to 4 at every call site, so an IPv6 measurement
+    would have described itself as IPv4 (backlog §2.1). `default` covers a
+    destination that is a hostname rather than a literal -- the probe still
+    has to pick a family, and IPv4 is what the rest of the pipeline assumes
+    when it cannot tell.
+    """
+    import ipaddress
+    try:
+        return ipaddress.ip_address(str(address)).version
+    except (ValueError, TypeError):
+        return default
+
+
 class traceroute_data:
     def __init__(
         self, dst_addr: str, annotation: str, proto: str, port: int, timestamp: int,

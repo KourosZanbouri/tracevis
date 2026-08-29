@@ -7,7 +7,7 @@ from utils.dpi import (
     classify_dpi_path,
     is_cgnat_address,
 )
-from utils.traceroute_struct import traceroute_data
+from utils.traceroute_struct import address_family, traceroute_data
 
 
 class TestClassifyDpiPath(unittest.TestCase):
@@ -299,6 +299,33 @@ class TestClearedRequiresTheProbeToHaveArrived(unittest.TestCase):
             dst_reached=True, rst_count=9)
         self.assertTrue(signal.rst_flood)
         self.assertFalse(signal.dpi_cleared)
+
+
+class TestAddressFamilyIsDerived(unittest.TestCase):
+    """`af` was hardcoded to 4 at every call site (backlog §2.1).
+
+    An IPv6 measurement would have described itself as IPv4 in the field
+    RIPE Atlas uses to say which family it is.
+    """
+
+    def test_ipv4_literal(self):
+        self.assertEqual(address_family("1.1.1.1"), 4)
+
+    def test_ipv6_literal(self):
+        self.assertEqual(address_family("2606:4700:4700::1111"), 6)
+        self.assertEqual(address_family("::1"), 6)
+
+    def test_a_hostname_falls_back_rather_than_raising(self):
+        # The probe still has to pick a family, and IPv4 is what the rest of
+        # the pipeline assumes when it cannot tell.
+        self.assertEqual(address_family("example.com"), 4)
+
+    def test_the_fallback_is_overridable(self):
+        self.assertEqual(address_family("example.com", default=6), 6)
+
+    def test_junk_does_not_raise(self):
+        self.assertEqual(address_family("***"), 4)
+        self.assertEqual(address_family(None), 4)
 
 
 if __name__ == "__main__":

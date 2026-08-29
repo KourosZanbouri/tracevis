@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import shutil
 import tempfile
 import unittest
 import unittest.mock
@@ -1487,3 +1488,118 @@ class TestPhaseOverlayReportsTheBand(unittest.TestCase):
         html = utils.vis._inject_phase_overlay(
             "<body></body>", cgnat_nodes=1, tier_nodes=4)
         self.assertIn("<br/>4 nodes behind it", html)
+
+
+class TestAddressFamilyAgnosticNodeIds(unittest.TestCase):
+    """Backlog §2.1: the graph layer accepts both address families."""
+
+    def test_ipv4_ids_are_unchanged(self):
+        """Existing captures must render to exactly the ids they always did."""
+        self.assertEqual(utils.vis.address_node_id("1.1.1.1"), "x16843009x")
+        self.assertEqual(utils.vis.address_node_id("192.168.1.1"),
+                         "x3232235777x")
+
+    def test_ipv6_addresses_get_an_id(self):
+        node_id = utils.vis.address_node_id("2606:4700:4700::1111")
+        self.assertTrue(node_id.startswith("xv6"))
+        self.assertTrue(node_id.endswith("x"))
+
+    def test_the_families_cannot_collide(self):
+        """`::1` and `0.0.0.1` are both the integer 1.
+
+        Without the family in the id a dual-stack capture would draw two
+        different hops as one node.
+        """
+        self.assertNotEqual(utils.vis.address_node_id("::1"),
+                            utils.vis.address_node_id("0.0.0.1"))
+
+    def test_a_non_address_has_no_id(self):
+        self.assertIsNone(utils.vis.address_node_id("not-an-address"))
+        self.assertIsNone(utils.vis.address_node_id("***"))
+        self.assertIsNone(utils.vis.address_node_id(None))
+
+    def test_the_fallback_keeps_unresolved_names_apart(self):
+        # resolve_or_ip returns the name unchanged when resolution fails, and
+        # the id builder used to raise on it and take the render down.
+        first = utils.vis._node_id_or_label("a.example")
+        second = utils.vis._node_id_or_label("b.example")
+        self.assertNotEqual(first, second)
+        self.assertNotIn(".", first)
+
+    def test_resolve_or_ip_passes_ipv6_through(self):
+        self.assertEqual(utils.vis.resolve_or_ip("2606:4700:4700::1111"),
+                         "2606:4700:4700::1111")
+        self.assertEqual(utils.vis.resolve_or_ip("::1"), "::1")
+
+    def test_resolve_or_ip_still_passes_ipv4_through(self):
+        self.assertEqual(utils.vis.resolve_or_ip("8.8.8.8"), "8.8.8.8")
+
+    def test_resolve_or_ip_returns_an_unresolvable_name_unchanged(self):
+        self.assertEqual(
+            utils.vis.resolve_or_ip("no-such-host.invalid"),
+            "no-such-host.invalid")
+
+
+class TestRespondingHopWithoutPacketBlobs(unittest.TestCase):
+    """A hop that answered but carries an empty `packets.received`.
+
+    `is_allowlist_boundary` was assigned only inside the branch that has
+    received packets to analyse, and read unconditionally below it, so such a
+    capture crashed the whole render with UnboundLocalError. RIPE Atlas data
+    and any capture written without packet blobs both have this shape.
+    Predates §2.1 and is not family-specific — found while rendering an IPv6
+    capture, reproduced identically on the IPv4 equivalent.
+    """
+
+    @staticmethod
+    def _capture(dst, src, hops):
+        return [{
+            "af": 6 if ":" in dst else 4, "dst_addr": dst, "src_addr": src,
+            "dst_name": "", "annotation": "probe", "endtime": 1000,
+            "from_ip": "127.0.0.1", "lts": -1, "msm_id": -1,
+            "msm_name": "traceroute", "paris_id": 0, "prb_id": -1,
+            "proto": "UDP", "port": 53, "size": 100, "timestamp": 900,
+            "ttr": -1, "asn": "AS0", "asname": "", "cc": "", "city": "",
+            "dpi_cleared": True, "cgnat_hop": False, "sni_inspected": False,
+            "rst_flood": False, "tcp_silently_dropped": False,
+            "network_state": "open",
+            "result": [
+                {"hop": index + 1,
+                 "result": [{"from": address, "rtt": 1.0, "size": 56,
+                             "ttl": 60, "summary": "s", "rst_count": 0,
+                             "packets": {"sent": [], "received": []}}]}
+                for index, address in enumerate(hops)],
+        }]
+
+    def _render(self, capture):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "c.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(capture, handle)
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        with redirect_stdout(io.StringIO()):
+            utils.vis.vis(measurement_path=path, attach_jscss=True,
+                          edge_lable="backttl")
+        return utils.vis.multi_directed_graph
+
+    def test_an_ipv4_capture_without_packet_blobs_renders(self):
+        graph = self._render(self._capture(
+            "1.1.1.1", "192.168.1.5", ["192.168.1.1", "10.0.0.1", "1.1.1.1"]))
+        self.assertEqual(graph.number_of_nodes(), 4)
+
+    def test_an_ipv6_capture_renders(self):
+        graph = self._render(self._capture(
+            "2606:4700:4700::1111", "2001:db8::5",
+            ["2001:db8::1", "2001:db8:1::1", "2606:4700:4700::1111"]))
+        self.assertEqual(graph.number_of_nodes(), 4)
+        labels = {data.get("label") for _n, data in graph.nodes(data=True)}
+        self.assertIn("2606:4700:4700::1111", labels)
+
+    def test_a_dual_stack_capture_keeps_the_families_apart(self):
+        capture = self._capture("0.0.0.1", "192.168.1.5",
+                                ["192.168.1.1", "0.0.0.1"])
+        capture += self._capture("::1", "2001:db8::5", ["2001:db8::1", "::1"])
+        graph = self._render(capture)
+        labels = {data.get("label") for _n, data in graph.nodes(data=True)}
+        self.assertIn("0.0.0.1", labels)
+        self.assertIn("::1", labels)

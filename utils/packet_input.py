@@ -157,7 +157,7 @@ class InputPacketInfo:
         if not cls._supported_or_correct(IP(packet_string)):
             if not cls._supported_or_correct(Ether(packet_string).payload):
                 raise BADPacketException(
-                    "it's not IPv4 or the hexdump is not started with IP layer")
+                    "it's not IPv4, or the hexdump does not start with the IP layer. tracevis renders IPv6 measurements but cannot probe over IPv6 (backlog 2.1), so an IPv6 packet has nothing to send it")
             else:
                 packet_object = Ether(packet_string).payload
         else:
@@ -213,7 +213,7 @@ class InputPacketInfo:
         print(" . . . - . developed view of first packet:")
         if not cls._supported_or_correct(packet):
             raise BADPacketException(
-                f"{k} it's not IPv4 or the hexdump is not started with IP layer")
+                f"{k} it's not IPv4, or the hexdump does not start with the IP layer. tracevis renders IPv6 measurements but cannot probe over IPv6 (backlog 2.1), so an IPv6 packet has nothing to send it")
         if show:
             packet.show()
             print(" . . . - .     . . . - .     . . . - .     . . . - . ")
@@ -295,7 +295,7 @@ class InputPacketInfo:
                 f"`p` is a {type(packet).__name__}, not a scapy packet")
         if not cls._supported_or_correct(packet):
             raise BADPacketException(
-                "it's not IPv4 or the hexdump is not started with IP layer")
+                "it's not IPv4, or the hexdump does not start with the IP layer. tracevis renders IPv6 measurements but cannot probe over IPv6 (backlog 2.1), so an IPv6 packet has nothing to send it")
         if show:
             print(" . . . - .     . . . - .     . . . - .     . . . - . ")
             print(" . . . - . developed view of first packet:")

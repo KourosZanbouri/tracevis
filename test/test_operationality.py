@@ -1,3 +1,5 @@
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
@@ -287,3 +289,57 @@ class TestIpv4ExitsBeforeProbing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIpv6ProbeTargetsAreRefusedEarly(unittest.TestCase):
+    """Backlog §2.1: rendering IPv6 works, probing over it does not.
+
+    Handing an IPv6 address to `IP(dst=...)` raises a bare `gaierror` from
+    inside scapy, well away from the target list that caused it. Refusing it
+    before any packet is sent turns that into a stated limitation.
+
+    Distinct from `--ipv4`, which is an opt-in assertion and also rejects
+    hostnames; this fires unconditionally and only on IPv6 literals.
+    """
+
+    def test_ipv6_literals_are_identified(self):
+        self.assertEqual(
+            tracevis.reject_ipv6_probe_targets(
+                ["1.1.1.1", "2606:4700:4700::1111", "8.8.8.8"]),
+            ["2606:4700:4700::1111"])
+
+    def test_ipv4_targets_are_left_alone(self):
+        self.assertEqual(
+            tracevis.reject_ipv6_probe_targets(["1.1.1.1", "8.8.8.8"]), [])
+
+    def test_hostnames_are_not_rejected_here(self):
+        # A hostname may resolve to either family; only --ipv4 objects to it.
+        self.assertEqual(tracevis.reject_ipv6_probe_targets(["example.com"]), [])
+
+    def test_junk_is_ignored_rather_than_raising(self):
+        self.assertEqual(tracevis.reject_ipv6_probe_targets(["***", "", None]),
+                         [])
+
+    def test_whitespace_is_tolerated(self):
+        self.assertEqual(
+            tracevis.reject_ipv6_probe_targets([" ::1 "]), [" ::1 "])
+
+    def test_a_trace_over_ipv6_exits_before_probing(self):
+        with self.assertRaises(SystemExit) as caught:
+            tracevis.main(tracevis.get_args(
+                ["--dns", "-i", "2606:4700:4700::1111"]))
+        self.assertEqual(caught.exception.code, 1)
+
+    def test_the_error_names_the_offender_and_the_way_forward(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
+            tracevis.main(tracevis.get_args(
+                ["--dns", "-i", "2606:4700:4700::1111"]))
+        output = buf.getvalue()
+        self.assertIn("2606:4700:4700::1111", output)
+        self.assertIn("cannot probe over IPv6", output)
+        self.assertIn("-f", output)
+
+    def test_rendering_a_capture_is_not_blocked(self):
+        """The refusal is about probing; -f must be unaffected."""
+        self.assertEqual(tracevis.reject_ipv6_probe_targets([]), [])

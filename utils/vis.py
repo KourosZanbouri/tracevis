@@ -62,20 +62,70 @@ multi_directed_graph = nx.MultiDiGraph()
 
 
 def resolve_or_ip(addr):
-    """Resolve a hostname to an IPv4 address, or pass through if already an IP.
+    """Resolve a hostname to an address, or pass through if already one.
 
     Fixes GitHub issue #68: vis() crashes when src_addr or dst_addr is a
-    hostname instead of an IPv4 address.
+    hostname instead of an address.
+
+    Backlog §2.1: both families are accepted. `socket.gethostbyname` is
+    IPv4-only, so a name with only a AAAA record raised `gaierror` and fell
+    through to the hostname, which then failed to parse as an address further
+    down. `getaddrinfo` answers for both.
     """
     try:
-        ipaddress.IPv4Address(addr)
+        ipaddress.ip_address(addr)
         return addr
-    except (ipaddress.AddressValueError, ValueError):
+    except (ValueError, TypeError):
         pass
     try:
-        return socket.gethostbyname(addr)
-    except socket.gaierror:
+        # AF_UNSPEC: whichever family the name actually has. IPv4 is preferred
+        # when a name has both, so an existing dual-stacked capture keeps
+        # resolving exactly as it did.
+        infos = socket.getaddrinfo(addr, None, socket.AF_UNSPEC,
+                                   socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError):
         return addr
+    for family in (socket.AF_INET, socket.AF_INET6):
+        for info in infos:
+            if info[0] == family:
+                return info[4][0]
+    return addr
+
+
+def address_node_id(addr, prefix="x", suffix="x"):
+    """Graph node id for an address, in either family.
+
+    The id is the address as an integer, which is unique within a family but
+    *not across* families: `::1` and `0.0.0.1` are both 1. The family is
+    folded into the id so a dual-stack capture cannot collapse two different
+    hops onto one node.
+
+    Returns None when `addr` is not an address at all, so callers can decide
+    -- some hops are "***" or a hostname that never resolved.
+    """
+    try:
+        parsed = ipaddress.ip_address(addr)
+    except (ValueError, TypeError):
+        return None
+    family = "" if parsed.version == 4 else "v6"
+    return prefix + family + str(int(parsed)) + suffix
+
+
+def _node_id_or_label(addr, prefix="x", suffix="x"):
+    """A node id for anything, address or not.
+
+    `resolve_or_ip` normally hands these an address, but it returns the name
+    unchanged when resolution fails -- offline, or a name that no longer
+    exists -- and the old code then raised `AddressValueError` and took the
+    whole render down. That was GitHub issue #68's crash in a different guise.
+    Falling back to the literal keeps the graph renderable and keeps two
+    different unresolved names on two different nodes.
+    """
+    node_id = address_node_id(addr, prefix=prefix, suffix=suffix)
+    if node_id is not None:
+        return node_id
+    safe = "".join(char if char.isalnum() else "_" for char in str(addr))
+    return prefix + "name" + safe + suffix
 
 
 def get_packet_type(packet_obj):
@@ -914,7 +964,7 @@ def source_node_id(src_addr, vp_id=None):
     RFC 1918 address, and keying the node on the address alone silently merged
     them into one source with no way to tell them apart.
     """
-    numeric = 'x' + str(int(ipaddress.IPv4Address(src_addr))) + 'x'
+    numeric = _node_id_or_label(src_addr)
     if vp_id:
         return numeric + "vp" + str(vp_id)
     return numeric
@@ -989,7 +1039,7 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
                 color="Chocolate", title=vp_label, shape="diamond")
         dst_addr = measurement["dst_addr"]
         dst_addr = resolve_or_ip(dst_addr)
-        dst_addr_id = 'x' + str(int(ipaddress.IPv4Address(dst_addr))) + 'x'
+        dst_addr_id = _node_id_or_label(dst_addr)
         annotation = "-"
         if "annotation" in measurement.keys():
             annotation = measurement["annotation"]
@@ -1039,6 +1089,15 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
                     append_lines = ""
                     is_middlebox = False
                     is_forged_reply = False
+                    # Set only inside the branch that has received packets to
+                    # analyse, but read unconditionally further down. A hop
+                    # that answered while carrying an empty `packets.received`
+                    # -- which RIPE Atlas data and any capture written without
+                    # packet blobs both produce -- reached that read with the
+                    # name unbound and took the whole render down with an
+                    # UnboundLocalError. Predates §2.1; found by rendering an
+                    # IPv6 capture, but nothing about it is family-specific.
+                    is_allowlist_boundary = False
                     if 'x' in result.keys():
                         current_node_id = (
                             "unknown" + previous_node_ids[repeat_steps] + "x")
@@ -1062,8 +1121,7 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
                                 current_edge_label = format(elapsed_ms, '.3f')
                         elif edge_lable == "backttl":
                             current_edge_label = str(backttl)
-                        current_node_id = 'x' + str(
-                            int(ipaddress.IPv4Address(answer_ip))) + 'x'
+                        current_node_id = _node_id_or_label(answer_ip)
                         current_node_label = answer_ip
                         packet_size = result.get("size", "*")
                         if "packets" in result.keys():

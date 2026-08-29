@@ -290,6 +290,18 @@ flags change what it shows and how it is drawn.
   CGNAT downstream of the first still reads as a boundary.
 - `-a` / `--attach` — embed the JS/CSS in the page instead of linking a CDN.
 
+### IPv6
+
+TraceVis **renders and analyses** IPv6 measurements: pass an IPv6 capture with
+`-f`, or download one with `--ripe` / `--vps`, and it graphs on both backends.
+Node ids carry the address family, so a dual-stack capture keeps `::1` and
+`0.0.0.1` on separate nodes rather than collapsing them.
+
+It **cannot probe over IPv6**. Every packet is built on scapy's IPv4 layer and
+the ephemeral-port helper binds `AF_INET`, so an IPv6 target is refused before
+any packet is sent, with a message saying so — rather than failing later as a
+bare `gaierror` from inside scapy. Backlog §2.1 tracks the remaining work.
+
 ### Comparing paired probes
 
 Several samples send two probes to the same destination and port, differing

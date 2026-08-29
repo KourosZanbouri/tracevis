@@ -20,6 +20,7 @@ import utils.forgery
 import utils.geolocate
 import utils.portpool
 import utils.timing
+import utils.traceroute_struct
 from utils.traceroute_struct import traceroute_data
 
 LOCALHOST = '127.0.0.1'
@@ -609,6 +610,7 @@ class Tracer:
         for request_ip in request_ips:
             self.measurement_data[0].append(
                 traceroute_data(
+                    af=utils.traceroute_struct.address_family(request_ip),
                     dst_addr=request_ip, annotation=annotation_1,
                     src_addr=self.source_ip, proto=packet_1_proto, port=packet_1_port,
                     timestamp=start_time, paris_id=paris_id, size=packet_1_size,
@@ -619,6 +621,7 @@ class Tracer:
             if self.have_2_packet:
                 self.measurement_data[1].append(
                     traceroute_data(
+                        af=utils.traceroute_struct.address_family(request_ip),
                         dst_addr=request_ip, annotation=annotation_2,
                         src_addr=self.source_ip, proto=packet_2_proto, port=packet_2_port,
                         timestamp=start_time, paris_id=paris_id, size=packet_2_size,

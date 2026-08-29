@@ -42,16 +42,23 @@ PORT_BOUND_MODES = ("dns", "dnstcp", "dnsdot", "dnstt")
 def reject_non_ipv4_targets(request_ips):
     """Return the targets that are not IPv4 addresses (GitHub issue #69).
 
-    tracevis probes IPv4 only — `utils/ephemeral_port.py` binds `AF_INET`,
-    `utils/traceroute_struct.py` fixes `af=4`, `utils/vis.py` parses every hop
-    as `IPv4Address` and `utils/packet_input.py` rejects non-IPv4 packets. But
-    nothing validated the target list, so an IPv6 literal passed to `-i` was
-    accepted here and failed later inside scapy or the renderer, well away from
-    the thing that caused it.
+    tracevis **probes** IPv4 only: `utils/ephemeral_port.py` binds `AF_INET`,
+    `utils/trace.py` builds every packet on scapy's `IP` layer, and
+    `utils/packet_input.py` accepts only IPv4 packets. But nothing validated
+    the target list, so an IPv6 literal passed to `-i` was accepted here and
+    failed later inside scapy — as a bare `gaierror` from `IP(dst=...)`, well
+    away from the thing that caused it.
 
-    `--ipv4` is therefore an explicit, checked assertion of what the tool
-    already does, and this is what makes the flag act rather than merely parse:
-    a target that is not IPv4 is named and the run stops before probing.
+    `--ipv4` is therefore an explicit, checked assertion, and this is what
+    makes the flag act rather than merely parse: a target that is not IPv4 is
+    named and the run stops before probing.
+
+    Backlog §2.1 narrowed what this is asserting. The *rendering and analysis*
+    half is no longer IPv4-only — `utils/vis.py` builds node ids for both
+    families and `traceroute_struct.address_family` derives `af` — so an IPv6
+    capture from RIPE Atlas or a file renders. Probing is what remains IPv4,
+    which is why `reject_ipv6_probe_targets` below refuses it unconditionally
+    rather than only under `--ipv4`.
     """
     rejected = []
     for target in request_ips:
@@ -59,6 +66,26 @@ def reject_non_ipv4_targets(request_ips):
             ipaddress.IPv4Address(str(target).strip())
         except (ipaddress.AddressValueError, ValueError):
             rejected.append(str(target))
+    return rejected
+
+
+def reject_ipv6_probe_targets(request_ips):
+    """Return the IPv6 targets in a list intended for live probing.
+
+    Separate from `reject_non_ipv4_targets`, which is `--ipv4`'s opt-in
+    assertion and also rejects hostnames. This one fires unconditionally and
+    only on IPv6 literals, because probing over IPv6 is not implemented and
+    the failure it produces is a bare `gaierror` raised inside scapy when
+    `IP(dst=...)` is handed an IPv6 address. Saying so here, before any packet
+    is sent, is the difference between a clear limitation and a stack trace.
+    """
+    rejected = []
+    for target in request_ips:
+        try:
+            if ipaddress.ip_address(str(target).strip()).version == 6:
+                rejected.append(str(target))
+        except (ValueError, TypeError):
+            continue
     return rejected
 
 
@@ -614,6 +641,14 @@ def main(args):
             sys.exit(1)
         print("· · · - · --ipv4: " + str(len(request_ips))
               + " target(s) confirmed IPv4")
+    ipv6_targets = reject_ipv6_probe_targets(request_ips)
+    if ipv6_targets and do_traceroute:
+        print("Error!\ntracevis cannot probe over IPv6 yet, and these targets "
+              "are IPv6: " + ", ".join(ipv6_targets)
+              + "\nRendering and analysing IPv6 measurements does work — pass "
+                "an existing capture with -f, or download one with --ripe / "
+                "--vps. See backlog 2.1.")
+        sys.exit(1)
     if args.get("reassembly_probe"):
         run_reassembly_probe(args["reassembly_probe"], accessible_address)
         return
