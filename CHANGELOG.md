@@ -5,6 +5,43 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added (backlog §1.4, rescoped — middlebox reassembly probe)
+- **Rescope written up in `docs/rescope-1.4-reassembly.md`.** The item as
+  written — fragment a ClientHello so no packet holds a complete SNI — targets
+  a middlebox that inspects packets individually. Current DPI reassembles the
+  stream before inspecting, which is what makes SNI extraction possible in the
+  first place; `utils/dpi.py` already encodes that. Shipping the emitter as
+  specified would ship a circumvention technique that is already dead, and
+  whose failure would be indistinguishable from ordinary blocking.
+- **What is left is the inverse, and it is a better measurement.** If the
+  middlebox reassembles, it holds state, and state has a timeout. Sweeping the
+  inter-segment delay upward until the block stops firing measures how long it
+  will hold a partial stream — a property of the equipment that is not
+  otherwise observable from outside.
+- **New module `utils/reassembly.py`** and `--reassembly-probe IP:PORT`:
+  segments a payload with correct sequence numbers (remainder spread across
+  the leading segments, so no segment is conspicuously large), plans a coarse
+  logarithmic delay sweep, and classifies the outcome. Five verdicts, two of
+  which are refusals to conclude: *buffer bounded*, *reassembles*, *does not
+  reassemble*, *block is not stream-based*, *inconclusive*.
+- The single-segment control is not optional and comes first in every sweep.
+  Without it the sweep cannot tell "the buffer expired" from "no block was
+  firing on this path at all".
+
+### Notes (§1.4) — what this does **not** establish
+- **Nothing here has been run against live DPI.** This environment has neither
+  root nor a censoring path. The emitter, the sweep and the classifier are
+  tested offline, and the send path against injected scapy entry points, so
+  what is verified is that the code does what it says — not that a real
+  middlebox behaves the way the classifier assumes.
+- Accordingly **no verdict is allowed to claim "strong" confidence**, and a
+  test pins that. Every report ends with a line saying it is unvalidated.
+- The one assumption worth naming: the sender maps **silence to BLOCKED**.
+  That is sound only because the probe sends a ClientHello to a host that
+  would answer one. A handshake that is refused, or answered by anything other
+  than a SYN-ACK, is reported UNKNOWN and no payload is sent — a closed port is
+  a fact about the port, not about how payloads are inspected.
+
 ### Fixed (`dpi_cleared` claimed a clean path for probes that never arrived)
 - **`utils/dpi.py` computed `dpi_cleared` with no term for whether the probe
   reached the destination.** The flag means "nothing interfered with this

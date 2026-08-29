@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import absolute_import, unicode_literals
 
 import argparse
 import ipaddress
@@ -18,6 +17,7 @@ import utils.ioda
 import utils.monitor
 import utils.packet_input
 import utils.portpool
+import utils.reassembly
 import utils.ripe_atlas
 import utils.sni
 import utils.timing
@@ -257,6 +257,14 @@ def get_args(sys_args, auto_exit=True):
                         "(GitHub issue #44; needs a measurement holding the "
                         "same destination from 2+ vantage points, via --vps "
                         "or several -f files)")
+    parser.add_argument('--reassembly-probe', dest='reassembly_probe',
+                        type=str, default=None,
+                        help="probe whether a middlebox reassembles the TCP "
+                             "stream, and how long it holds the buffer "
+                             "(backlog 1.4, rescoped -- see "
+                             "docs/rescope-1.4-reassembly.md). Takes "
+                             "IP:PORT. Needs root. NOT validated against live "
+                             "DPI; treat its verdicts as provisional.")
     parser.add_argument('--compare-arms', dest='compare_arms',
                         action='store_true',
                         help="compare paired control/treatment probes in the "
@@ -318,6 +326,41 @@ def render_measurement(args, measurement_path, attach_jscss, edge_lable,
         highlight_selected=bool(args.get("highlight_selected")),
         renderer=args.get("renderer", "visjs"),
         reverse_path=bool(args.get("reverse_path")))
+
+
+def run_reassembly_probe(target, accessible_address):
+    """Backlog §1.4 (rescoped): measure a middlebox's stream reassembly.
+
+    Returns the sweep result, or None if the target could not be parsed. The
+    verdict is printed with an explicit note that nothing here has been run
+    against live DPI -- the classifier is only as good as the assumption that
+    a silent probe means a dropped one, and that assumption is the part a
+    restricting network still has to confirm.
+    """
+    host, _, port = target.partition(":")
+    try:
+        ipaddress.IPv4Address(host.strip())
+        dport = int(port) if port else 443
+    except (ValueError, ipaddress.AddressValueError):
+        print(f"Error!\n--reassembly-probe expects IP:PORT, got: {target}")
+        return None
+
+    packet_1, _annot1, _packet_2, _annot2 = utils.sni.make_sni_packets(
+        blocked_address=accessible_address or "www.example.com",
+        accessible_address=accessible_address or "www.example.com")
+    payload = bytes(packet_1[utils.sni.Raw].load) \
+        if packet_1.haslayer(utils.sni.Raw) else b""
+    if not payload:
+        print("Error!\n--reassembly-probe could not build a ClientHello")
+        return None
+
+    source_ip = utils.trace.user_source_ip_address
+    sender = utils.reassembly.make_scapy_sender(
+        host.strip(), dport, source_ip)
+    result = utils.reassembly.probe_reassembly(sender, payload)
+    print()
+    print(utils.reassembly.format_sweep(result))
+    return result
 
 
 def report_arm_comparison(measurement_path):
@@ -571,6 +614,9 @@ def main(args):
             sys.exit(1)
         print("· · · - · --ipv4: " + str(len(request_ips))
               + " target(s) confirmed IPv4")
+    if args.get("reassembly_probe"):
+        run_reassembly_probe(args["reassembly_probe"], accessible_address)
+        return
     if do_traceroute:
         try:
             if args.get("packet") or args.get("rexmit"):
