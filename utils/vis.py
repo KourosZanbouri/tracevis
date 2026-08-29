@@ -1003,6 +1003,72 @@ def build_request_colors(all_measurements):
             for i in range(len(all_measurements))]
 
 
+class MeasurementFormatError(ValueError):
+    """A capture file that cannot be rendered, carrying a reason to print.
+
+    `vis()` used to dereference the file's shape directly -- `json.load`,
+    then `all_measurements[0]["src_addr"]` -- so every malformed input left
+    an unhandled traceback on the operator's terminal instead of a sentence:
+    `JSONDecodeError` for a truncated file, `IndexError` for `[]`, `KeyError`
+    for a JSON object rather than a list. A capture arriving truncated is an
+    ordinary outcome on the networks this tool measures, so its own reader
+    should not be the thing that breaks.
+    """
+
+
+# The fields `vis()` actually dereferences rather than reads with `.get()`.
+# Checked against every measurement in this repository's captures -- 96 of
+# them -- so requiring these cannot reject a file the tool used to render.
+REQUIRED_MEASUREMENT_FIELDS = ("src_addr", "dst_addr", "result")
+
+
+def load_measurements(measurement_path):
+    """Read a capture, or raise MeasurementFormatError saying what is wrong.
+
+    Validates only the shape that rendering depends on. Anything else absent
+    is the renderer's business and is already handled with defaults -- an
+    over-strict reader would reject captures that render perfectly well.
+    """
+    try:
+        with open(measurement_path, encoding="utf-8") as json_file:
+            data = json.load(json_file)
+    except OSError as exc:
+        raise MeasurementFormatError(
+            f"cannot read {measurement_path}: {exc}") from exc
+    except ValueError as exc:
+        raise MeasurementFormatError(
+            f"{measurement_path} is not valid JSON: {exc}") from exc
+
+    if not isinstance(data, list):
+        raise MeasurementFormatError(
+            f"{measurement_path} holds a JSON {type(data).__name__}, not the "
+            "list of measurements a capture is")
+    if not data:
+        raise MeasurementFormatError(
+            f"{measurement_path} holds no measurements")
+
+    for index, measurement in enumerate(data):
+        where = f"{measurement_path}: measurement {index}"
+        if not isinstance(measurement, dict):
+            raise MeasurementFormatError(
+                f"{where} is a {type(measurement).__name__}, not a JSON object")
+        missing = [field for field in REQUIRED_MEASUREMENT_FIELDS
+                   if field not in measurement]
+        if missing:
+            raise MeasurementFormatError(
+                f"{where} is missing " + ", ".join(missing))
+        hops = measurement["result"]
+        if not isinstance(hops, list) or not hops:
+            raise MeasurementFormatError(
+                f"{where} has no hops in `result`")
+        # vis() indexes result[0]["result"] to size the repeat loop.
+        first = hops[0]
+        if not isinstance(first, dict) or not first.get("result"):
+            raise MeasurementFormatError(
+                f"{where} has a first hop with no probe results")
+    return data
+
+
 def vis(measurement_path, attach_jscss, edge_lable: str = "none",
         phase_overlay: bool = False, highlight_selected: bool = False,
         renderer="visjs", reverse_path=False):
@@ -1011,9 +1077,11 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
     # file. The CLI renders once per run so it never surfaced there, but it made
     # `vis()` wrong as a function and impossible to test in isolation.
     multi_directed_graph.clear()
-    all_measurements = []
-    with open(measurement_path) as json_file:
-        all_measurements = json.load(json_file)
+    try:
+        all_measurements = load_measurements(measurement_path)
+    except MeasurementFormatError as exc:
+        print("Error!\n" + str(exc))
+        return False
     if not attach_jscss and needs_offline_assets(all_measurements):
         print("· · · - · network state is "
               + ", ".join(sorted(observed_censored_states(all_measurements)))

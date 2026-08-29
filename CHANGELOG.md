@@ -5,6 +5,34 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed (a malformed capture left a traceback instead of a message)
+- **`vis()` dereferenced the capture's shape directly** — `json.load`, then
+  `all_measurements[0]["src_addr"]` — so every malformed input reached the
+  operator as an unhandled traceback: `JSONDecodeError` on a truncated file,
+  `IndexError` on `[]`, `KeyError` on a JSON object rather than a list. A
+  capture arriving truncated is an ordinary outcome on the networks this tool
+  measures, so its own reader should not be the thing that breaks.
+- New `load_measurements()` and `MeasurementFormatError` in `utils/vis.py`.
+  Eleven malformed shapes now produce a sentence naming the file, the problem
+  and — where a capture holds several measurements — **which one** is at
+  fault. `vis()` returns False rather than raising.
+- **The reader validates only what rendering dereferences**
+  (`src_addr`, `dst_addr`, `result`, and a first hop with probe results),
+  checked against all 96 measurements in this repository's 19 captures. An
+  over-strict reader would reject files that render perfectly well, which
+  would be worse than the crash it replaces; `annotation`, for instance, is
+  absent from real captures and stays optional.
+- `tracevis.py` now **exits 1** when a render is attempted and rejected.
+  Before the reader existed this path was an unhandled traceback, which at
+  least exited 1 — reporting the problem cleanly while returning 0 would have
+  been a silent regression, and a test pins the exit code.
+
+### Changed (four test mocks, because a return value started meaning something)
+- `mock.patch("utils.vis.vis", return_value=False)` appeared in four places.
+  The value was arbitrary when `vis()` returned `None` regardless; it now
+  means "the render failed", which `tracevis.py` turns into a non-zero exit.
+  All four stand in for a render that succeeded and return True.
+
 ### Fixed (a responding hop with no packet blobs crashed the whole render)
 - **`is_allowlist_boundary` was assigned only inside the branch that has
   received packets to analyse, and read unconditionally below it.** A hop that

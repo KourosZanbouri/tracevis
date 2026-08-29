@@ -1,5 +1,7 @@
 import contextlib
 import io
+import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -343,3 +345,44 @@ class TestIpv6ProbeTargetsAreRefusedEarly(unittest.TestCase):
     def test_rendering_a_capture_is_not_blocked(self):
         """The refusal is about probing; -f must be unaffected."""
         self.assertEqual(tracevis.reject_ipv6_probe_targets([]), [])
+
+
+class TestMalformedCaptureExitsNonZero(unittest.TestCase):
+    """A rejected capture must not look like a successful run to a script.
+
+    Before the capture reader existed this path was an unhandled traceback,
+    which at least exited 1. Reporting the problem cleanly while returning 0
+    would have been a silent regression, so the exit code is pinned here.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def _run(self, raw):
+        path = os.path.join(self.dir, "c.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(raw)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as caught:
+            tracevis.main(tracevis.get_args(["-f", path]))
+        return caught.exception.code, buf.getvalue()
+
+    def test_truncated_json_exits_one(self):
+        code, output = self._run("{not json")
+        self.assertEqual(code, 1)
+        self.assertIn("not valid JSON", output)
+
+    def test_an_empty_capture_exits_one(self):
+        code, output = self._run("[]")
+        self.assertEqual(code, 1)
+        self.assertIn("no measurements", output)
+
+    def test_a_json_object_exits_one(self):
+        code, output = self._run('{"a": 1}')
+        self.assertEqual(code, 1)
+        self.assertIn("not the list of measurements", output)
+
+    def test_no_traceback_reaches_the_operator(self):
+        _code, output = self._run("{not json")
+        self.assertNotIn("Traceback", output)

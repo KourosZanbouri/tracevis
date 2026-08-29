@@ -401,7 +401,7 @@ class TestSampleWiring(unittest.TestCase):
             ["--config-file", os.path.join(SAMPLES_DIR, config_name)],
             auto_exit=False)
         with mock.patch("utils.trace.trace_route", side_effect=stub), \
-                mock.patch("utils.vis.vis", return_value=False), \
+                mock.patch("utils.vis.vis", return_value=True), \
                 redirect_stdout(io.StringIO()):
             tracevis.main(args)
         return captured

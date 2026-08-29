@@ -6,6 +6,7 @@ that the phase-overlay legend is injected, and that all of this
 remains backward-compatible with measurements that carry no CGNAT
 information at all.
 """
+import glob
 import io
 import json
 import os
@@ -1603,3 +1604,103 @@ class TestRespondingHopWithoutPacketBlobs(unittest.TestCase):
         labels = {data.get("label") for _n, data in graph.nodes(data=True)}
         self.assertIn("0.0.0.1", labels)
         self.assertIn("::1", labels)
+
+
+class TestMalformedCapturesAreReportedNotRaised(unittest.TestCase):
+    """`vis()` dereferenced the file's shape directly and left tracebacks.
+
+    `json.load` then `all_measurements[0]["src_addr"]` produced
+    JSONDecodeError on a truncated file, IndexError on `[]` and KeyError on a
+    JSON object. A capture arriving truncated is an ordinary outcome on the
+    networks this tool measures, so its own reader should not be the thing
+    that breaks.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def _write(self, name, raw=None, payload=None):
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(raw if raw is not None else json.dumps(payload))
+        return path
+
+    @staticmethod
+    def _hop():
+        return {"hop": 1, "result": [{"from": "10.0.0.1", "rtt": 1.0,
+                                      "size": 56, "ttl": 60, "summary": "s",
+                                      "rst_count": 0,
+                                      "packets": {"sent": [], "received": []}}]}
+
+    def _ok(self):
+        return {"src_addr": "192.168.1.5", "dst_addr": "1.1.1.1",
+                "result": [self._hop()]}
+
+    def _reason(self, **kwargs):
+        with self.assertRaises(utils.vis.MeasurementFormatError) as caught:
+            utils.vis.load_measurements(self._write("c.json", **kwargs))
+        return str(caught.exception)
+
+    def test_truncated_json(self):
+        self.assertIn("not valid JSON", self._reason(raw="{not json"))
+
+    def test_an_empty_list(self):
+        self.assertIn("no measurements", self._reason(payload=[]))
+
+    def test_a_json_object_rather_than_a_list(self):
+        self.assertIn("not the list of measurements",
+                      self._reason(payload={"a": 1}))
+
+    def test_a_list_of_scalars(self):
+        self.assertIn("not a JSON object", self._reason(payload=[1, 2, 3]))
+
+    def test_a_missing_required_field_is_named(self):
+        capture = self._ok()
+        del capture["src_addr"]
+        self.assertIn("missing src_addr", self._reason(payload=[capture]))
+
+    def test_several_missing_fields_are_all_named(self):
+        self.assertIn("missing src_addr, dst_addr",
+                      self._reason(payload=[{"result": [self._hop()]}]))
+
+    def test_an_empty_result_list(self):
+        self.assertIn("no hops", self._reason(payload=[{**self._ok(),
+                                                        "result": []}]))
+
+    def test_a_first_hop_with_no_probe_results(self):
+        self.assertIn("no probe results", self._reason(
+            payload=[{**self._ok(), "result": [{"hop": 1, "result": []}]}]))
+
+    def test_the_offending_measurement_is_identified_by_index(self):
+        """A capture holds many measurements; naming which one matters."""
+        self.assertIn("measurement 1", self._reason(
+            payload=[self._ok(), {"src_addr": "x"}]))
+
+    def test_a_missing_file_is_reported_not_raised(self):
+        with self.assertRaises(utils.vis.MeasurementFormatError) as caught:
+            utils.vis.load_measurements(os.path.join(self.dir, "nope.json"))
+        self.assertIn("cannot read", str(caught.exception))
+
+    def test_vis_returns_false_rather_than_raising(self):
+        path = self._write("c.json", raw="{not json")
+        with redirect_stdout(io.StringIO()) as buf:
+            result = utils.vis.vis(measurement_path=path, attach_jscss=True)
+        self.assertFalse(result)
+        self.assertIn("not valid JSON", buf.getvalue())
+
+    def test_a_valid_capture_is_accepted_unchanged(self):
+        path = self._write("c.json", payload=[self._ok()])
+        self.assertEqual(len(utils.vis.load_measurements(path)), 1)
+
+    def test_the_reader_does_not_reject_this_repository_s_captures(self):
+        """An over-strict reader would be worse than the crash it replaces."""
+        captures = glob.glob("tracevis_data*/*.json")
+        self.assertGreater(len(captures), 0, "no captures found to check")
+        for path in captures:
+            utils.vis.load_measurements(path)
+
+    def test_only_the_fields_rendering_dereferences_are_required(self):
+        # `annotation` is absent from real captures and must stay optional.
+        self.assertEqual(set(utils.vis.REQUIRED_MEASUREMENT_FIELDS),
+                         {"src_addr", "dst_addr", "result"})

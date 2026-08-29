@@ -756,9 +756,17 @@ def main(args):
             was_successful = True
     if was_successful and args.get("compare_arms"):
         report_arm_comparison(measurement_path)
-    if was_successful and render_measurement(
-            args, measurement_path, attach_jscss, edge_lable, input_packet):
-        print("finished.")
+    if was_successful:
+        if render_measurement(args, measurement_path, attach_jscss,
+                              edge_lable, input_packet):
+            print("finished.")
+        else:
+            # A render that reported a bad capture used to leave the exit code
+            # at 0, so a script could not tell a rendered graph from a
+            # rejected file. Before the capture reader existed this path was
+            # an unhandled traceback, which at least exited 1; keeping that
+            # code is what stops the fix from being a silent regression.
+            sys.exit(1)
 
 
 if __name__ == "__main__":

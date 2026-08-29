@@ -1113,7 +1113,7 @@ class TestPortBoundModeGuards(unittest.TestCase):
 
         args = tracevis.get_args(argv, auto_exit=False)
         with mock.patch("utils.trace.trace_route", side_effect=stub), \
-                mock.patch("utils.vis.vis", return_value=False), \
+                mock.patch("utils.vis.vis", return_value=True), \
                 redirect_stdout(io.StringIO()):
             tracevis.main(args)
         return captured
@@ -1126,7 +1126,7 @@ class TestPortBoundModeGuards(unittest.TestCase):
 
         args = tracevis.get_args(argv, auto_exit=False)
         with mock.patch("utils.trace.trace_route", side_effect=stub), \
-                mock.patch("utils.vis.vis", return_value=False), \
+                mock.patch("utils.vis.vis", return_value=True), \
                 redirect_stdout(buffer):
             tracevis.main(args)
         return buffer.getvalue()
@@ -1183,7 +1183,7 @@ class TestEndToEndFromASampleConfig(TraceTestCase):
             patched(net, stack)
             stack.enter_context(mock.patch.dict(
                 os.environ, {"TRACEVIS_OUTPUT_DIR": self.tmp + "/"}))
-            stack.enter_context(mock.patch("utils.vis.vis", return_value=False))
+            stack.enter_context(mock.patch("utils.vis.vis", return_value=True))
             args = tracevis.get_args(
                 ["--config-file", "samples/syn443.conf", "-m", "2", "-r", "1"],
                 auto_exit=False)
