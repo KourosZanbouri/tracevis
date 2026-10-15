@@ -617,12 +617,19 @@ combined graph, **one edge colour per vantage point**, with each probe's source
 drawn as its own labelled diamond ("source (VP 1)", "source (VP 2)", …). Probes
 that report the same private address stay distinct.
 
-`--ioda-country IR` (default) fetches IODA's connectivity status for that
-country and records it on every measurement in the capture, so it shows up in
-the hop tooltip as `IODA[IR]: outage (value=…)`. It is a single country-level
-cross-check against the run as a whole — it does **not** geolocate individual
-probes, so it does not tell you which particular VP sits in an outage. If IODA
-is unreachable the download is unaffected and nothing is recorded.
+`--ioda-country IR` (default) asks [IODA](https://ioda.inetintel.cc.gatech.edu/)
+whether it recorded an outage in that country **while each measurement was
+running**, and records the answer on the measurement. The hop tooltip then
+shows, for example, `IODA[IR]: outage (gtr since 2026-01-08, merit-nt since
+2026-03-08)` or `IODA[IR]: no outage`. The start dates matter: an outage open
+for months is a standing condition, not something that happened during your
+trace. A clean result is shown too, because a blocked path during "no outage"
+points at targeted filtering rather than a national event.
+
+Limits: it is country-level, so it does not tell you which VP sits inside an
+outage. An outage that began more than a year before the measurement is not
+reported. If IODA is unreachable, the download is unaffected and nothing is
+recorded.
 
 Add `--reverse-path` to mark the segment every probe traverses identically on
 its way to the destination:

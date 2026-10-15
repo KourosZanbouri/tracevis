@@ -13,6 +13,7 @@ import networkx as nx
 
 import utils.convert_packetlist
 import utils.dpi
+import utils.ioda
 import utils.renderer
 
 ROUTER_COLOR = "green"
@@ -1114,12 +1115,9 @@ def vis(measurement_path, attach_jscss, edge_lable: str = "none",
         vp_id = measurement.get("vp")
         if vp_id:
             annotation = f"VP {vp_id}" + (f" / {annotation}" if annotation != "-" else "")
-        ioda_status = measurement.get("ioda_status")
-        if ioda_status and isinstance(ioda_status, dict):
-            cc = ioda_status.get("country", "")
-            if ioda_status.get("outage"):
-                annotation = (f"{annotation} / IODA[{cc}]:"
-                              f" outage (value={ioda_status.get('latest_value', '?')})")
+        ioda_line = utils.ioda.tooltip_line(measurement.get("ioda_status"))
+        if ioda_line:
+            annotation = f"{annotation} / {ioda_line}"
         all_results = measurement["result"]
         results_repeat_length = len(all_results[0]["result"])
         previous_node_ids = initialize_first_nodes_nx(

@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import shutil
 import sys
@@ -386,3 +387,56 @@ class TestMalformedCaptureExitsNonZero(unittest.TestCase):
     def test_no_traceback_reaches_the_operator(self):
         _code, output = self._run("{not json")
         self.assertNotIn("Traceback", output)
+
+
+class TestVpsRecordsIodaStatus(unittest.TestCase):
+    """Backlog §3.2: `--vps` → IODA → capture, wired through `main()`.
+
+    The pieces were each tested, but nothing ran the CLI path, and the fetch
+    it called pointed at an endpoint that does not exist.
+    """
+
+    MID_SHUTDOWN = {"vp": "1", "dst_addr": "1.1.1.1",
+                    "timestamp": 1768900000, "endtime": 1768900600}
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = os.path.join(self.dir, "multi.json")
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump([dict(self.MID_SHUTDOWN)], handle)
+
+    def _run(self, urlopen):
+        from unittest import mock
+        buf = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch(
+                "utils.ripe_atlas.download_multi_from_atlas",
+                return_value=(True, self.path)))
+            stack.enter_context(mock.patch(
+                "tracevis.render_measurement", return_value=True))
+            stack.enter_context(mock.patch("utils.ioda.urllib.request.urlopen", urlopen))
+            stack.enter_context(contextlib.redirect_stdout(buf))
+            tracevis.main(tracevis.get_args(["--vps", "1,2"]))
+        with open(self.path, encoding="utf-8") as handle:
+            return json.load(handle)[0], buf.getvalue()
+
+    def test_an_outage_during_the_measurement_is_recorded(self):
+        from unittest import mock
+        fixture = os.path.join(os.path.dirname(__file__), "fixtures",
+                               "ioda_events_ir_20260120.json")
+        with open(fixture, "rb") as handle:
+            body = handle.read()
+        resp = mock.MagicMock()
+        resp.__enter__.return_value = resp
+        resp.read.return_value = body
+        measurement, output = self._run(mock.MagicMock(return_value=resp))
+        self.assertTrue(measurement["ioda_status"]["outage"])
+        self.assertIn("ping-slash24", measurement["ioda_status"]["datasources"])
+        self.assertIn("IODA[IR]: outage during 1 of 1 measurement(s)", output)
+
+    def test_an_unreachable_api_leaves_the_capture_untouched(self):
+        from unittest import mock
+        measurement, output = self._run(mock.MagicMock(side_effect=TimeoutError("t")))
+        self.assertEqual(measurement, self.MID_SHUTDOWN)
+        self.assertIn("IODA unavailable, not recorded", output)

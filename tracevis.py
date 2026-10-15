@@ -208,8 +208,9 @@ def get_args(sys_args, auto_exit=True):
                              "point.")
     parser.add_argument('--ioda-country', dest='ioda_country', type=str,
                         default=None,
-                        help="cross-check a RIPE Atlas VP against IODA outage status "
-                             "for this 2-letter country code (default: IR). Only used with --vps.")
+                        help="record whether IODA saw an outage in this 2-letter "
+                             "country while each measurement ran (default: IR). "
+                             "Only used with --vps.")
     parser.add_argument('-I', '--ripemids', type=str,
                         help="add comma-separated RIPE Atlas measurement IDs (up to 12)")
     parser.add_argument('-f', '--file', type=str, action='append', nargs='+',
@@ -706,25 +707,22 @@ def main(args):
             measurement_ids=measurement_ids)
         ioda_country = args.get("ioda_country") or "IR"
         if was_successful:
-            try:
-                status = utils.ioda.fetch_ioda_status(ioda_country)
-                print(f"IODA status for {ioda_country}: "
-                      f"available={status['available']} "
-                      f"outage={status['outage']} "
-                      f"value={status['latest_value']}")
-                # Write it into the capture as well. Printing alone left the
-                # cross-check invisible in the graph: utils.vis reads
-                # measurement["ioda_status"] and nothing ever set it.
-                annotated = utils.ioda.annotate_measurements(
-                    measurement_path, status)
-                if annotated:
-                    print(f"· · · - · IODA[{status['country']}] recorded on "
-                          f"{annotated} measurement(s)")
-                elif status.get("error"):
-                    print("· · · - · IODA unavailable, not recorded: "
-                          + str(status["error"]))
-            except Exception as e:
-                print(f"IODA fetch failed: {e}")
+            # Judged per measurement, against the time it actually ran, and
+            # written into the capture so utils.vis can render it.
+            annotated, outages, status = utils.ioda.annotate_measurements(
+                measurement_path, ioda_country)
+            if annotated:
+                print(f"· · · - · IODA[{status['country']}]: outage during "
+                      f"{outages} of {annotated} measurement(s)")
+                if not status.get("available"):
+                    print("· · · - · IODA: some measurements not checked: "
+                          + str(status.get("error")))
+            elif status is None:
+                print("· · · - · IODA not checked: the capture has no "
+                      "usable measurement times")
+            else:
+                print("· · · - · IODA unavailable, not recorded: "
+                      + str(status.get("error")))
     if args.get("ripe"):
         measurement_ids = ""
         if args.get("ripemids"):

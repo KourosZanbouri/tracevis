@@ -12,9 +12,39 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
   Iran, zero on a UTC host. The offset was never recorded, so there is nothing
   to correct them from. `endtime − timestamp` is unaffected. RIPE Atlas
   downloads were never affected, since their epochs come from Atlas.
+- **`ioda_status` has a new shape**: `{country, outage, datasources, events,
+  window}`, judged per measurement. The old shape (`latest_value`,
+  `latest_date`) was never written to any capture, because the old fetcher
+  never succeeded (below).
 - New measurement field **`clock`**: `"utc"` on every measurement the tracer
   writes from now on. A tracevis capture without it predates this fix. The
   field is absent from RIPE Atlas data, which needs no such marker.
+
+### Fixed (backlog §3.2 — the IODA cross-check had never reached IODA)
+- `utils/ioda.py` called `ioda.caida.org/ioda-data/data/v3/{CC}/index.json`,
+  which does not exist, and parsed a schema no endpoint serves. Its 30 tests
+  mocked that schema, so they passed while every `--vps` run reported IODA
+  as *unavailable*. Rewritten against the real v2 API
+  (`api.ioda.inetintel.cc.gatech.edu/v2/outages/events`).
+- **Judged per measurement, against the time it ran**, rather than against
+  "latest". Measurements close in time share one request; windows more than a
+  day apart get their own. A real multi-VP capture here mixed Aug 2026 and
+  Dec 2021 results, and one request across both risked IODA's 500-event page
+  limit. A full page is treated as an error, since a missing event would read
+  as "no outage".
+- **Events, not alerts, with a one-year lookback.** IODA alerts mark state
+  changes, so a trace twelve days into the January shutdown had none near it.
+  Events are intervals, but IODA only looks back `extendWindow` (14 days by
+  default) for where one began. Measured against the API: a trace on 20 Aug
+  2026 saw nothing with 14 or 90 days of lookback, while with a year it sees
+  outages open since 8 Jan (`gtr`) and 8 Mar (`merit-nt`).
+- The tooltip names each datasource with its start date, and a clean result
+  now reads `IODA[IR]: no outage` instead of showing nothing.
+- Tests run against responses recorded from the real API
+  (`test/fixtures/ioda_events_*.json`, fetched with the module's own
+  parameters). Two opt-in live tests (`TRACEVIS_LIVE_TESTS=1`) pin the
+  server-side behaviour, and a new `main()`-level test covers
+  `--vps` → IODA → capture.
 
 ### Fixed (backlog §3.1 — timestamps shifted by the host's UTC offset)
 - `utils/trace.py` computed both epochs as

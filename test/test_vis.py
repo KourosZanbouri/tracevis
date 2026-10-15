@@ -469,15 +469,29 @@ class TestEdgeHighlight(VisFixtureMixin, unittest.TestCase):
 
 
 class TestIodaAnnotation(VisFixtureMixin, unittest.TestCase):
-    """§2.2: IODA status cross-reference annotation on VP measurements."""
-    def test_ioda_status_field_present_in_tooltip(self):
+    """§2.2/§3.2: the IODA status written by utils.ioda reaches the graph.
+
+    This used to assert only that "IR" appeared somewhere in the page, which
+    any rendering would satisfy.
+    """
+    def render_with(self, ioda_status):
         measurement = make_measurement(
             src_addr="10.0.0.1", dst_addr="1.1.1.1", vp="1001")
-        measurement["ioda_status"] = {
-            "country": "IR", "outage": True, "latest_value": 0.85}
-        page = self.render([measurement])
-        # The IODA status should surface somewhere in the rendered page.
-        self.assertIn("IR", page)
+        if ioda_status is not None:
+            measurement["ioda_status"] = ioda_status
+        return self.render([measurement])
+
+    def test_an_outage_names_its_datasources(self):
+        page = self.render_with({"country": "IR", "outage": True,
+                                 "datasources": ["bgp", "ping-slash24"]})
+        self.assertIn("IODA[IR]: outage (bgp, ping-slash24)", page)
+
+    def test_a_clean_result_is_shown(self):
+        self.assertIn("IODA[IR]: no outage",
+                      self.render_with({"country": "IR", "outage": False}))
+
+    def test_no_status_adds_no_ioda_line(self):
+        self.assertNotIn("IODA[", self.render_with(None))
 
 
 class TestMiddleboxFingerprint(unittest.TestCase):

@@ -186,9 +186,11 @@ Goal: make what is already shipped true on the hosts it is used from.
   for existing captures; unit job additionally run under `TZ=Asia/Tehran`.
   Added a `clock: "utc"` marker so post-fix captures can be told apart from
   shifted ones.
-- [ ] **M8b — §3.2** IODA rewrite against `/v2/outages/alerts`, queried over
-  the measurement's own time window; fixtures from a recorded real response;
-  README corrected. Depends on M8a.
+- [x] **M8b — §3.2** IODA rewrite, queried over each measurement's own time
+  window; fixtures from recorded real responses; README corrected. Built on
+  `/v2/outages/events` with a 1-year lookback, not `/alerts`: measured against
+  the API, alerts and the default 14-day event lookback both miss an outage
+  that began months before the trace, which is Iran's situation all year.
 - [ ] **M8c — §3.3 + §3.4** input-file errors become messages; bare-`except`
   pass.
 
