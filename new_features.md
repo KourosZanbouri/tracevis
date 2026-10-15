@@ -12,6 +12,34 @@
 
 TraceVis is a censorship measurement and network analysis tool that performs traceroute with arbitrary packets to detect middleboxes and firewalls. This report catalogs **all feature requests, enhancements, bug reports, and pull requests** from the project's GitHub repository, organized by category and priority. The project has **10 closed issues + 43 closed PRs** (many implementing features) and **17 open issues + 3 open PRs** spanning visualization, probing algorithms, middlebox detection, data handling, platform integration, and infrastructure.
 
+## 0. Status in this fork (refreshed Oct 15 2026)
+
+The catalogue below describes **upstream** (`wikicensorship/tracevis`), whose
+last activity was 2025-01-08; it was re-read through the GitHub API on
+Oct 15 2026 and nothing has changed. This fork has since resolved several of
+its open items. Where an "open" entry below disagrees with this table, this
+table reflects the code.
+
+| Upstream item | Fork status | Where |
+|---|---|---|
+| #2 Highlight path of selected edge | ✅ `--highlight-selected`, both renderers | `utils/vis.py`, `utils/renderer.py` |
+| #8 Run continuously and upload | ⚠️ Continuous half done (`--monitor`); no upload | `utils/monitor.py`; backlog §2.7 |
+| #24 TCP session without firewall manipulation | ❌ Open | — |
+| #25 IPv6 | ⚠️ Renders and analyses; probing blocked on host | backlog §2.1/§4.8 |
+| #43 PEP local-ACK vs local-retransmission | ❌ Open | — |
+| #44 Reverse traceroute | ✅ VP-convergence reverse-path segment (`--reverse-path`) | `utils/vis.py` |
+| #46 More probing algorithms | ⚠️ SNI, DoT-port, dnstt, reassembly and A/B samples added; concrete next probes are backlog §4.2–§4.6 | `utils/sni.py`, `utils/reassembly.py` |
+| #47 Two new middlebox fingerprints | ✅ MSS clamping, timestamp stripping, IP-ID entropy | `utils/vis.py` |
+| #54 mtraceroute | ❌ Open (`--paris` covers the flow-id half) | — |
+| #56 Double-check anonymizing | ✅ Reworked in M6a (`--anonymize`, own address always removed) | `utils/anonymize.py` |
+| #64 More graphing libraries | ✅ `--renderer visjs\|plotly` | `utils/renderer.py` |
+| #65 Legend follow-up | ⚠️ Legend extended (phase overlay, band size, reverse path); no positioning controls | `utils/vis.py` |
+| #67 OONI alongside TraceVis | ❌ Open → backlog §4.10 | — |
+| #68 Domain-based graph save crash | ✅ Fixed | `utils/vis.py` |
+| #69 Force IPv4 | ✅ `--ipv4` (asserting, since probing is IPv4-only) | `tracevis.py` |
+| #75 Meta race condition | ✅ Fixed | `utils/geolocate.py` |
+| PR #5 setup file · PR #48 logger · PR #72 DOT export | ❌ Not adopted → backlog §4.9 | — |
+
 ---
 
 ## 1. Completed Features (Closed Issues + Corresponding PRs)
@@ -46,7 +74,7 @@ TraceVis is a censorship measurement and network analysis tool that performs tra
 | [#15](https://github.com/wikicensorship/tracevis/pull/15) | improve 5/n | — | — | Dec 18, 2021 | Incremental improvements |
 | [#17](https://github.com/wikicensorship/tracevis/pull/17) | change dockerfile arrangement and update readme | — | — | Dec 20, 2021 | Dockerfile restructuring |
 | [#18](https://github.com/wikicensorship/tracevis/pull/18) | refactor6/n | — | — | Dec 20, 2021 | Code refactoring |
-| [#19](https://github.com/wikicensorship/tracevis/pull/19) | **web-interface added by flask** | Low | enhancement, priority/low | **Jan 8, 2025** | Flask-based web UI for TraceVis |
+| [#19](https://github.com/wikicensorship/tracevis/pull/19) | **web-interface added by flask** | Low | enhancement, priority/low | *closed unmerged* Jan 8, 2025 | Flask-based web UI for TraceVis. **Correction (Oct 2026):** GitHub reports `merged: false`; no Flask code exists in either repository |
 | [#20](https://github.com/wikicensorship/tracevis/pull/20) | Add CSV Output | — | enhancement | Dec 23, 2021 | CSV export format |
 | [#21](https://github.com/wikicensorship/tracevis/pull/21) | rtt measurement correction | — | — | Dec 24, 2021 | RTT calculation fix |
 | [#22](https://github.com/wikicensorship/tracevis/pull/22) | support doing TCP handshake before sending data packet | — | — | Dec 31, 2021 | Implements #7 |
@@ -212,7 +240,7 @@ TraceVis is a censorship measurement and network analysis tool that performs tra
 - **OONI Probe** (Issue #67): Censorship measurement platform integration
 - **RIPE Atlas** (README + PR #4): Existing integration for traceroute data download
 - **GraphViz** (PR #72): DOT format export
-- **Flask** (PR #19): Web interface (merged Jan 2025)
+- **Flask** (PR #19): Web interface (closed unmerged, Jan 2025)
 
 ---
 
@@ -328,7 +356,7 @@ TraceVis is a censorship measurement and network analysis tool that performs tra
 3. https://github.com/wikicensorship/tracevis/pull/5 — Add setup file
 
 ### Key Closed PRs (43) - Selected Highlights
-- https://github.com/wikicensorship/tracevis/pull/19 — Web interface (Flask) **merged Jan 8, 2025**
+- https://github.com/wikicensorship/tracevis/pull/19 — Web interface (Flask), closed **unmerged** Jan 8, 2025
 - https://github.com/wikicensorship/tracevis/pull/42 — Detect NAT and PEP
 - https://github.com/wikicensorship/tracevis/pull/55 — Whois and anonymize data
 - https://github.com/wikicensorship/tracevis/pull/57 — Unittests

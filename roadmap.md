@@ -68,9 +68,11 @@ Scope: new node types, phase overlay, refreshed sample configs.
   derivable post-trace in `vis.py`, so it cannot fire mid-loop; see
   the architecture notes. Smoke-tested on an unrestricted network; the backoff
   paths still need a restricting network to fire against.
-- [ ] `ipv6-quic.conf` — **blocked** on backlog §2.1: the codebase is IPv4-only
-  (`utils/packet_input.py::_supported_or_correct`, `utils/vis.py` `IPv4Address`,
-  `utils/traceroute_struct.py` `af=4`), so an IPv6 sample cannot load or trace.
+- [ ] `ipv6-quic.conf` — **blocked** on backlog §2.1's probing half. *(Updated
+  Oct 2026: the `vis.py` and `traceroute_struct.py` hardcodes this line used to
+  cite were removed in v1.3.0, so IPv6 measurements render. What remains is that
+  `utils/trace.py` sends only on scapy's `IP` layer, so an IPv6 sample still
+  cannot trace.)*
 
 - [x] **M5e** — three protocol-shape A/B samples
   (`grpc-h2c`, `shadowsocks`, `wireguard`), `--port-pool`
@@ -168,6 +170,52 @@ that never arrived); measurement files stamped to the minute silently
 overwrote each other, which `--monitor` would have made routine; and a hop
 that answered while carrying an empty `packets.received` — the shape RIPE
 Atlas data has — crashed the entire render with `UnboundLocalError`.
+
+> **Superseded Oct 15 2026.** "Nothing is left that code alone can finish"
+> was true of the backlog as written, but not of the tool. The Oct audit
+> (`docs/review/audit-20261015.md`) found two P0 correctness defects that code
+> alone *can* finish (§3.1 timestamps, §3.2 IODA). It also found the probe
+> shapes had fallen behind the measured networks (§4.x). Milestones 8 and 9
+> below take over.
+
+## Milestone 8 — Correctness (Oct 2026 audit: §3.1–§3.4)
+
+Goal: make what is already shipped true on the hosts it is used from.
+
+- [ ] **M8a — §3.1** UTC epochs everywhere; `utcnow()` removed; upgrade note
+  for existing captures; unit job additionally run under `TZ=Asia/Tehran`.
+- [ ] **M8b — §3.2** IODA rewrite against `/v2/outages/alerts`, queried over
+  the measurement's own time window; fixtures from a recorded real response;
+  README corrected. Depends on M8a.
+- [ ] **M8c — §3.3 + §3.4** input-file errors become messages; bare-`except`
+  pass.
+
+Acceptance: the suite passes under both UTC and `Asia/Tehran`; one recorded
+IODA response round-trips into a rendered tooltip; `ruff` E722/F821 count is 0
+outside string annotations.
+
+## Milestone 9 — Adapting the probes (Oct 2026: §4.1–§4.7)
+
+Goal: measure the traffic people actually send in late 2026, and keep the
+evidence that tells *rejection* apart from *drop*.
+
+Order is by evidence-per-risk:
+
+1. **§4.1 ICMP type/code**: offline-verifiable against stored captures,
+   touches no send path.
+2. **§4.2 modern ClientHello builder** (browser-shaped + X25519MLKEM768 arm),
+   then **§4.3** (DoT/DoH/DoQ first flights) and **§4.4** (ECH pair) on the
+   same builder.
+3. **§4.6 samples** for QUIC-tunnel and WebRTC/STUN shapes (A/B, like M5e).
+4. **§4.7 per-ASN IODA** (after M8b).
+5. **§4.5 packet-budget probe**, last: same live-validation gap as §1.4.
+
+Exit: a single field-session checklist covering everything still marked
+*not validated against live DPI* (§1.4, §1.5 backoff, §4.2, §4.5), so the
+live work is done once, on one path, with root.
+
+**Still blocked on hardware, not code:** §2.1/§4.8 (IPv6 probing) and the
+§2.10 UDP arm.
 
 ---
 

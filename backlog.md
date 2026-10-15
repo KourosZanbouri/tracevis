@@ -12,7 +12,10 @@ open: none outright. Partial: 2.1 (IPv6 renders and analyses; probing over it
 needs a host with IPv6 and root) and 2.10 (the analysis ships; a controlled
 endpoint is still needed for the UDP arm only).
 
-**The roadmap is complete as of M6c; everything still open lives here.**
+**Oct 15 2026 audit** (`docs/review/audit-20261015.md`) reopened the list:
+three defects (§3.1–§3.3, two of them P0), two housekeeping items (§3.4–§3.5)
+and ten adaptation items (§4.1–§4.10) for changes in the measured networks
+since the Aug 6 threat report. Scheduled as Milestones 8 and 9 in `roadmap.md`.
 
 ---
 
@@ -60,6 +63,38 @@ endpoint is still needed for the UDP arm only).
 
 ---
 
+## §3 — Defects found in the Oct 15 2026 audit
+
+| ID | Pri | Task | Why | Risk | Depends on |
+|----|-----|------|-----|------|------------|
+| 3.1 | P0 | **Write measurement timestamps as true UTC epochs** | `int(datetime.utcnow().timestamp())` (`utils/trace.py:609,677`) reads a naive UTC time as local, so the epoch is shifted by the host's offset: **−12600 s on a Tehran host**, zero on UTC hosts like CI, which is why nothing noticed. Wrong in every capture taken in the tool's main environment, and it skews `--monitor` and any outage-window correlation. Replace with `datetime.now(timezone.utc)` / `time.time()` at all 8 `utcnow()` sites (the 6 file-name ones are correct values but deprecated on 3.14). Old captures cannot be fixed without the host offset, which was never recorded, so add an upgrade note. Test under `TZ=Asia/Tehran`. | L | — |
+| 3.2 | P0 | **Rewrite `utils/ioda.py` against the real IODA API** | `IODA_BASE_URL` (`ioda.caida.org/ioda-data/data/v3`) does not exist, and the parser and its 30 tests target a guessed schema, so the cross-check has never fetched anything and every run reports *unavailable*. The real endpoint, `api.ioda.inetintel.cc.gatech.edu/v2/outages/alerts?entityType=country&entityCode=IR&from=&until=`, answers and returns `{datasource, time, level, condition, value, historyValue}` alerts (verified Oct 15 against Jan 8 2026: `ping-slash24` and `bgp` both `critical`). Query the measurement's own `[timestamp, endtime]` window, not "latest". Rebuild test fixtures from a recorded real response. Correct `README.md:605-620`. | M | 3.1 |
+| 3.3 | P2 | Handle a missing or malformed `--packet-data @file` | Raw `FileNotFoundError` / `JSONDecodeError` traceback from `tracevis.py:461-466`. The handler meant for it (`utils/packet_input.py:248`) is unreachable and would itself raise `NameError` (undefined `file`). Same class as the v1.3.0 `-f` fix. | L | — |
+| 3.4 | P3 | Bare-`except` pass | Deferred by the Aug audit and still present ×5 (`iface.py`, `ephemeral_port.py`, `packet_input.py` ×2+, `csv.py`). Each needs its own decision about which exceptions are expected. | L | — |
+| 3.5 | P3 | Split `utils/trace.py` (send path vs trace loop) | 1139 → 1234 lines since the Aug audit. A real risk; give it its own milestone, after §4.2/§4.3, which add to the send path. | M | — |
+
+## §4 — Adapting to network changes since Aug 2026
+
+Sources and evidence: the Oct 2026 addendum (§15) of
+`IRAN_INTERNET_CIRCUMVENTION_REPORT.md`. Every live-network item keeps the
+§1.4 discipline: build, test offline against scapy/`FakeNetwork`, and cap
+verdicts at *moderate* until a censoring path has confirmed them.
+
+| ID | Pri | Task | Why | Risk | Depends on |
+|----|-----|------|-----|------|------------|
+| 4.1 | P1 | **Record ICMP type/code per hop** | `parse_packet` keeps only scapy's `summary()` string. Administratively-prohibited unreachables (3/9, 3/10, 3/13) are how an allowlist *rejects*, as distinct from silently dropping (`tcp_silently_dropped`) or TTL expiry. Losing them conflates the two regimes the tool exists to tell apart. Add optional `icmp_type`/`icmp_code` to the hop record, read them in `dpi.py`, and add a node style for *rejected*. Offline-testable against stored captures. Follow-on: compare the quoted header in ICMP errors against what was sent (tracebox-style) to localise header rewriting per hop. | L | 2.0 |
+| 4.2 | P1 | **Modern ClientHello shapes for `--sni-test`** | `utils/sni.py` sends no `key_share` and no ALPN, which no 2026 client does. Add a browser-shaped hello (key_share, ALPN `h2,http/1.1`, GREASE) and a **post-quantum arm** (X25519MLKEM768, `0x11EC`; 1216-byte client share). The PQ hello spans two TCP segments as ordinary browser traffic, so a same-SNI classic-vs-PQ pair shows whether the path treats the traffic of today's real clients differently. That is a reassembly measurement with no evasion technique in it. Feeds `--compare-arms`. | M | 2.10 |
+| 4.3 | P1 | **Real encrypted-DNS shapes: DoT, DoH, DoQ** | `--dnsdot` sends plaintext DNS on TCP/853, so it measures the port, not the protocol. FOCI 2025 found ECH censored *indirectly* in Iran by blocking encrypted DNS. Add the first flight a censor actually inspects: a TLS ClientHello with ALPN `dot` on 853; one with SNI `cloudflare-dns.com`/`dns.google` and ALPN `h2` on 443 (DoH); a QUIC Initial with ALPN `doq` on UDP/853. No TLS client dependency needed, since the hello is all the DPI sees. This closes the old "real DoT/DoH client" item, which never had an ID. | M | 4.2 (shared builder) |
+| 4.4 | P1 | **ECH probe pair** | `samples/quicv1ech.conf` is labelled "QUICv1 no SNI" and carries no ECH. Add a same-outer-SNI pair, with and without an `encrypted_client_hello` (`0xfe0d`) extension (GREASE-shaped payload, as Chrome sends), with `cloudflare-ech.com` as the outer name. Russia blocks ECH by that name, and Iran blocks it indirectly (4.3). | M | 4.2 |
+| 4.5 | P2 | **"Grey SNI" packet-budget probe** | net4people #626 reports that a non-allowlisted SNI gets about 6 packets before the DPI kills the flow. That is a parameter of the equipment, like §1.4's reassembly timeout. After the handshake, send N data segments, sweep N, and report where delivery stops for a control vs a treatment SNI. Same design, caveats and confidence cap as §1.4. Needs root and a live path. | H | 4.2, 1.4 |
+| 4.6 | P2 | **Samples for current tunnel shapes** | No probe for QUIC-based tunnels (Hysteria2/TUIC: QUIC v1 Initial on a non-443 UDP port, vs Salamander-style random UDP), or for WebRTC-carrier tunnelling through allowlisted services (net4people #618: STUN Binding Request on UDP/3478 vs same-length random UDP). Sample-only work, built as A/B pairs like M5e. Extend `test/test_samples.py`. | L | 2.5 |
+| 4.7 | P2 | **Per-ASN, time-windowed IODA annotation** | After §3.2, `entityType=asn` with the measurement's source ASN gives each vantage point its own outage status, removing the "country-level only" limitation recorded in `project-status.md` without a probe-metadata lookup. | L | 3.2 |
+| 4.8 | P2 | IPv6 probing (completes §2.1) | Unchanged blocker, a host with IPv6 and root. New reason to want it: during the Jan 2026 shutdown, TIC withdrew IPv6 routes while ~98% of IPv4 prefixes stayed announced (arXiv 2603.28753), so v4/v6 divergence is itself a regime signal. | H | 2.1 |
+| 4.9 | P3 | Packaging, logging and DOT export | Upstream open PRs #5 (setup/pyproject), #48 (logger) and #72 (graphviz DOT). No `pyproject.toml` exists; output is all `print`. | L | — |
+| 4.10 | P3 | OONI corroboration (upstream #67) | Pull OONI measurements for the same ASN and time window to corroborate a verdict. Low priority; same epoch dependency as 4.7. | M | 3.1 |
+
+---
+
 ## Risk register (top)
 
 | Risk | Mitigation |
@@ -68,3 +103,6 @@ endpoint is still needed for the UDP arm only).
 | No network in CI to test real traces | Unit-test detection/DPI/dns logic with mocked `urlopen`/`sr` responses; use scapy loopback for RST/flood sims. |
 | Python 3.14 / scapy API drift | Pin tested scapy version; test against installed deps. |
 | Scope creep / rewrites | Each task isolated to one module; keep each change inside one module. |
+| External API drift (IODA, RIPE Atlas, metadata providers) | §3.2 showed mocked tests can pass against an endpoint that never existed. Build fixtures from a *recorded real* response and keep one opt-in live smoke test per endpoint. |
+| Unvalidated-on-live-network features pile up | §1.4, §1.5 backoff, and soon §4.2/§4.5 are offline-tested only. Every such verdict is capped at *moderate* and says so. Batch the live validation into one field session with a checklist (M9 exit). |
+| Host-environment assumptions (timezone, IPv6, root) | §3.1 was invisible because CI runs in UTC. Run the unit job under a non-UTC `TZ` as well. |
