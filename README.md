@@ -234,6 +234,13 @@ the port it actually probed (`dport`, which matters once RST rotation moves it),
 its `rst_count`, and — when a TCP handshake was refused rather than ignored — a
 `note` saying what answered instead.
 
+`timestamp` and `endtime` are UTC epochs, as in RIPE Atlas data. Captures made
+by tracevis 1.3.1 or later say so with `"clock": "utc"`. A tracevis capture
+**without** that key predates the fix and may be shifted by the capturing
+host's UTC offset (−3 h 30 m on a host in Iran). Durations are still right, but
+its absolute times are not trustworthy. RIPE Atlas captures never carry the
+key, and their times are correct.
+
 ## IPv4 only
 
 tracevis probes IPv4 end to end: `utils/ephemeral_port.py` binds `AF_INET`,

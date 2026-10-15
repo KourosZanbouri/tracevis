@@ -3,7 +3,7 @@
 import json
 import sys
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from time import sleep
 
 MEASUREMENT_IDS = [
@@ -34,12 +34,12 @@ def download_multi_from_atlas(
         measurement_name = (name_prefix + "-ripe-atlas-multi-"
                             + "-".join(str(p) for p in probe_ids_list)
                             + "-tracevis-"
-                            + datetime.utcnow().strftime("%Y%m%d-%H%M"))
+                            + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M"))
     else:
         measurement_name = ("ripe-atlas-multi-"
                             + "-".join(str(p) for p in probe_ids_list)
                             + "-tracevis-"
-                            + datetime.utcnow().strftime("%Y%m%d-%H%M"))
+                            + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M"))
     print(
         " ********************************************************************** ")
     print(
@@ -109,10 +109,10 @@ def download_from_atlas(
         measurement_ids = MEASUREMENT_IDS
     if name_prefix != "":
         measurement_name = name_prefix + "-ripe-atlas-" + str(probe_id) + "-tracevis-" \
-            + datetime.utcnow().strftime("%Y%m%d-%H%M")
+            + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
     else:
         measurement_name = "ripe-atlas-" + str(probe_id) + "-tracevis-" \
-            + datetime.utcnow().strftime("%Y%m%d-%H%M")
+            + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
     if probe_id != "":
         print(
             " ********************************************************************** ")

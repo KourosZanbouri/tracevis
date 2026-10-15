@@ -5,6 +5,36 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Upgrade notes
+- **Captures taken before this release on a non-UTC host have shifted
+  timestamps, and cannot be corrected.** `timestamp` and `endtime` were off by
+  the negative of the host's UTC offset: −12600 s (−3 h 30 m) on a host in
+  Iran, zero on a UTC host. The offset was never recorded, so there is nothing
+  to correct them from. `endtime − timestamp` is unaffected. RIPE Atlas
+  downloads were never affected, since their epochs come from Atlas.
+- New measurement field **`clock`**: `"utc"` on every measurement the tracer
+  writes from now on. A tracevis capture without it predates this fix. The
+  field is absent from RIPE Atlas data, which needs no such marker.
+
+### Fixed (backlog §3.1 — timestamps shifted by the host's UTC offset)
+- `utils/trace.py` computed both epochs as
+  `int(datetime.utcnow().timestamp())`. `utcnow()` returns a *naive* datetime
+  holding UTC wall-clock time, and `.timestamp()` interprets a naive datetime
+  as **local** time, so every capture taken in the tool's main environment
+  claimed to start three and a half hours before it did. That skews
+  `--monitor`'s run labels, misaligns a capture against RIPE Atlas data, and
+  would have matched a trace to the wrong side of an outage window. It was
+  invisible because CI, Docker and the development sandbox all run in UTC,
+  where the error is exactly zero. Now `int(time.time())`.
+- The six remaining `utcnow()` calls (file-name stamps in `utils/trace.py` and
+  `utils/ripe_atlas.py`) produced correct values but are deprecated on the
+  Python 3.14 this project pins. They now use `datetime.now(timezone.utc)`, and
+  file names are unchanged.
+- `test/test_tracer.py::TestTimestampsAreUtcEpochs` runs a trace at UTC+3:30.
+  It uses a POSIX `TZ` string, so it needs no tzdata and cannot silently fall
+  back to UTC. Against the old code it fails by exactly 12600 s.
+- CI runs the unit suite a second time under `TZ=Asia/Tehran`.
+
 ## [1.3.0] — 2026-08-29
 
 ### Upgrade notes

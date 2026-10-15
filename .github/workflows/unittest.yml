@@ -22,3 +22,11 @@ jobs:
         run: pip install -r requirements.txt
       - name: Launch tests
         run: python -m unittest discover test
+      # Backlog §3.1: measurement timestamps were shifted by the host's UTC
+      # offset for months, invisible because this runner is UTC. Run the suite
+      # again off UTC (Iran, the half-hour offset the tool is mostly used at) so
+      # anything else that confuses local and UTC time fails here.
+      - name: Launch tests (non-UTC host)
+        env:
+          TZ: Asia/Tehran
+        run: python -m unittest discover test

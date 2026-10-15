@@ -33,7 +33,7 @@ class traceroute_data:
          sni_inspected: bool = False, rst_flood: bool = False,
          tcp_silently_dropped: bool = False, network_state: str = "",
          provider_status: str = "", reply_forged: bool = False,
-         forgery_evidence: str = ""
+         forgery_evidence: str = "", clock: str = ""
       ) -> None:
         self.af = af
         self.dst_addr = dst_addr
@@ -52,6 +52,14 @@ class traceroute_data:
         self.size = size
         self.src_addr = src_addr
         self.timestamp = timestamp
+        # Backlog §3.1: "utc" means `timestamp` and `endtime` are true UTC
+        # epochs. Before v1.3.1 the tracer wrote them shifted by the host's UTC
+        # offset, and that offset was never recorded, so a tracevis capture
+        # without this key cannot be trusted to better than +/-14h in absolute
+        # time (durations are unaffected). Empty by default: only the code that
+        # actually produces a correct epoch may claim one. RIPE Atlas captures
+        # never carry it and never needed it; their epochs come from Atlas.
+        self.clock = clock
         self.ttr = ttr
         self.asn = network_asn
         self.asname = network_name

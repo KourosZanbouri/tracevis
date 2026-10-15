@@ -7,7 +7,7 @@ import platform
 import sys
 import time
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from time import sleep
 
 from scapy.all import (DNS, ICMP, IP, TCP, UDP, PacketList, RandInt, RandShort,
@@ -606,15 +606,20 @@ class Tracer:
             packet_2_proto, packet_1_port, packet_2_port, packet_1_size,
             packet_2_size, paris_id, public_ip, network_asn, network_name,
             country_code, city):
-        start_time = int(datetime.utcnow().timestamp())
+        # Backlog §3.1. This was `int(datetime.utcnow().timestamp())`, and
+        # `.timestamp()` reads a naive datetime as *local* time, so the epoch
+        # came out shifted by the host's UTC offset: -12600 s on a Tehran host,
+        # zero on a UTC one, which is why CI never saw it. `time.time()` is the
+        # epoch directly, with no timezone to get wrong.
+        start_time = int(time.time())
         for request_ip in request_ips:
             self.measurement_data[0].append(
                 traceroute_data(
                     af=utils.traceroute_struct.address_family(request_ip),
                     dst_addr=request_ip, annotation=annotation_1,
                     src_addr=self.source_ip, proto=packet_1_proto, port=packet_1_port,
-                    timestamp=start_time, paris_id=paris_id, size=packet_1_size,
-                    from_ip=public_ip, network_asn=network_asn,
+                    timestamp=start_time, clock="utc", paris_id=paris_id,
+                    size=packet_1_size, from_ip=public_ip, network_asn=network_asn,
                     network_name=network_name, country_code=country_code, city=city
                 )
             )
@@ -624,8 +629,8 @@ class Tracer:
                         af=utils.traceroute_struct.address_family(request_ip),
                         dst_addr=request_ip, annotation=annotation_2,
                         src_addr=self.source_ip, proto=packet_2_proto, port=packet_2_port,
-                        timestamp=start_time, paris_id=paris_id, size=packet_2_size,
-                        from_ip=public_ip, network_asn=network_asn,
+                        timestamp=start_time, clock="utc", paris_id=paris_id,
+                        size=packet_2_size, from_ip=public_ip, network_asn=network_asn,
                         network_name=network_name, country_code=country_code, city=city
                     )
                 )
@@ -674,7 +679,7 @@ class Tracer:
 
     def save_measurement_data(
             self, request_ips, measurement_name, continue_to_max_ttl, output_dir):
-        end_time = int(datetime.utcnow().timestamp())
+        end_time = int(time.time())  # see initialize_json_first_nodes
         measurement_data_json = []
         ip_steps = 0
         measurement_data_save = deepcopy(self.measurement_data)
@@ -769,7 +774,7 @@ class Tracer:
         """
         if not self.measurement_data[0]:
             return ""
-        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
         measurement_name = (name_prefix or "") + stamp + "-partial"
         request_ips = [entry.dst_addr for entry in self.measurement_data[0]]
         print("· · · - · interrupted — saving partial measurement")
@@ -1007,7 +1012,7 @@ class Tracer:
         print("· · · - · network state: " + network_state)
 
         measurement_name = (f"{name_prefix}-{network_asn}-tracevis-" if name_prefix else f"{network_asn}-tracevis-") + \
-            datetime.utcnow().strftime("%Y%m%d-%H%M")
+            datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
 
         self.initialize_json_first_nodes(
             request_ips=request_ips, annotation_1=annotation_1, annotation_2=annotation_2,

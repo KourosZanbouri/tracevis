@@ -182,8 +182,10 @@ Atlas data has — crashed the entire render with `UnboundLocalError`.
 
 Goal: make what is already shipped true on the hosts it is used from.
 
-- [ ] **M8a — §3.1** UTC epochs everywhere; `utcnow()` removed; upgrade note
+- [x] **M8a — §3.1** UTC epochs everywhere; `utcnow()` removed; upgrade note
   for existing captures; unit job additionally run under `TZ=Asia/Tehran`.
+  Added a `clock: "utc"` marker so post-fix captures can be told apart from
+  shifted ones.
 - [ ] **M8b — §3.2** IODA rewrite against `/v2/outages/alerts`, queried over
   the measurement's own time window; fixtures from a recorded real response;
   README corrected. Depends on M8a.

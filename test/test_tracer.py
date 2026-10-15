@@ -20,7 +20,9 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
+import warnings
 from contextlib import ExitStack, redirect_stdout
 from unittest import mock
 
@@ -1191,6 +1193,80 @@ class TestEndToEndFromASampleConfig(TraceTestCase):
         saved = [f for f in os.listdir(self.tmp) if f.endswith(".json")]
         self.assertEqual(len(saved), 1, f"expected one measurement, got {saved}")
         self.assertTrue(net.probes, "no probes were sent")
+
+
+class TestTimestampsAreUtcEpochs(TraceTestCase):
+    """Backlog §3.1: `timestamp`/`endtime` were shifted by the host's UTC offset.
+
+    `int(datetime.utcnow().timestamp())` reads a naive UTC wall-clock time as
+    local time, so on a host at UTC+3:30 every capture claimed to start three
+    and a half hours before it did. CI runs in UTC, where the error is zero, so
+    the bug was invisible to every test until one ran in another zone.
+
+    The zone is a POSIX TZ string rather than `Asia/Tehran`, so the test needs
+    no tzdata and cannot quietly fall back to UTC on a slim image.
+    """
+
+    ZONE = "IRST-3:30"    # POSIX sign convention: UTC+3:30
+
+    def setUp(self):
+        super().setUp()
+        self._old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = self.ZONE
+        time.tzset()
+        self.addCleanup(self._restore_tz)
+        # Guard: if the zone did not take, every assertion below is vacuous.
+        self.assertEqual(time.localtime().tm_gmtoff, 12600)
+
+    def _restore_tz(self):
+        if self._old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self._old_tz
+        time.tzset()
+
+    def saved_measurement(self, **kwargs):
+        net = FakeNetwork(rule=lambda p: icmp_time_exceeded("10.0.0.1"))
+        _, path, _ = self.run_trace(
+            net, request_packet_1=IP(dst="0.0.0.0") / UDP(dport=53), **kwargs)
+        with open(path) as handle:
+            return json.load(handle)[0]
+
+    def test_saved_epochs_are_the_real_time_off_utc(self):
+        before = int(time.time())
+        measurement = self.saved_measurement()
+        after = int(time.time())
+        self.assertGreaterEqual(measurement["timestamp"], before)
+        self.assertLessEqual(measurement["timestamp"], after)
+        self.assertGreaterEqual(measurement["endtime"], measurement["timestamp"])
+        self.assertLessEqual(measurement["endtime"], after)
+
+    def test_saved_measurement_declares_its_clock(self):
+        self.assertEqual(self.saved_measurement()["clock"], "utc")
+
+    def test_both_packet_arms_declare_their_clock(self):
+        net = FakeNetwork(rule=lambda p: icmp_time_exceeded("10.0.0.1"))
+        _, path, _ = self.run_trace(
+            net, request_packet_1=IP(dst="0.0.0.0") / UDP(dport=53),
+            request_packet_2=IP(dst="0.0.0.0") / UDP(dport=123))
+        with open(path) as handle:
+            measurements = json.load(handle)
+        self.assertEqual(len(measurements), 2)
+        self.assertEqual([m["clock"] for m in measurements], ["utc", "utc"])
+
+    def test_a_struct_built_elsewhere_claims_no_clock(self):
+        """Only the code that produces a correct epoch may say so."""
+        from utils.traceroute_struct import traceroute_data
+        entry = traceroute_data(
+            dst_addr="1.1.1.1", annotation="", proto="udp", port=53, timestamp=0)
+        self.assertEqual(entry.clock, "")
+
+    def test_the_trace_raises_no_utcnow_deprecation(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", DeprecationWarning)
+            self.saved_measurement()
+        self.assertEqual(
+            [w for w in caught if "utcnow" in str(w.message)], [])
 
 
 if __name__ == "__main__":
