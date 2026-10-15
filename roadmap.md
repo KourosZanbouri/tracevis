@@ -191,8 +191,9 @@ Goal: make what is already shipped true on the hosts it is used from.
   `/v2/outages/events` with a 1-year lookback, not `/alerts`: measured against
   the API, alerts and the default 14-day event lookback both miss an outage
   that began months before the trace, which is Iran's situation all year.
-- [ ] **M8c — §3.3 + §3.4** input-file errors become messages; bare-`except`
-  pass.
+- [x] **M8c — §3.3 + §3.4** input-file errors become messages; bare-`except`
+  pass. Also an unknown `--iface` (same class), and an RST-DROP iptables rule
+  that could be left installed when its verification failed.
 
 Acceptance: the suite passes under both UTC and `Asia/Tehran`; one recorded
 IODA response round-trips into a rendered tooltip; `ruff` E722/F821 count is 0

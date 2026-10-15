@@ -4,8 +4,14 @@ import json
 import subprocess
 
 from scapy.all import IP, TCP, UDP, Ether, hexdump, import_hexcap
+from scapy.packet import Packet
 
 import utils.anonymize
+
+# What running iptables can fail with: it ran and refused (non-zero exit), or
+# it could not run at all (not installed, no permission).
+_IPTABLES_ERRORS = (subprocess.CalledProcessError, OSError)
+_RST_DROP_RULE = ['OUTPUT', '-p', 'tcp', '--tcp-flags', 'RST', 'RST', '-j', 'DROP']
 
 FIREWALL_COMMANDS_HELP = "\r\n( · - · · · \r\n\
 You may need to temporarily block RST output packets in your firewall.\r\n\
@@ -90,46 +96,66 @@ class InputPacketInfo:
         if self._add_firewall_rule:
             self._remove_firewal_out_drop_rule()
 
+    @staticmethod
+    def _iptables(*args):
+        subprocess.run(['iptables', *args], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     @classmethod
     def _iptables_exists(cls):
         try:
-            p = subprocess.run(['iptables', '-L', '-n'], check=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            cls._iptables('-L', '-n')
             return True
-        except:
+        except _IPTABLES_ERRORS:
             return False
 
     @classmethod
     def _check_firewal_out_drop_rule(cls):
         try:
-            p = subprocess.run(['iptables', '-C', 'OUTPUT', '-p', 'tcp',
-                                '--tcp-flags', 'RST', 'RST', '-j', 'DROP'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            cls._iptables('-C', *_RST_DROP_RULE)
             return True
-        except:
+        except _IPTABLES_ERRORS:
             return False
+
+    # Backlog §3.4. Both methods below used a bare `except:` that also caught
+    # their own "cannot be verified" FirewallException and replaced it with a
+    # vaguer one, so the operator could not tell "iptables refused" from
+    # "iptables said yes and the rule is not there".
 
     @classmethod
     def _add_firewal_out_drop_rule(cls):
         try:
-            p = subprocess.run(['iptables', '-A', 'OUTPUT', '-p', 'tcp',
-                                '--tcp-flags', 'RST', 'RST', '-j', 'DROP'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if not cls._check_firewal_out_drop_rule():
-                raise FirewallException("Added DROP rule cannot be verified")
-            return True
-        except:
-            raise FirewallException("Adding DROP rule failed")
+            cls._iptables('-A', *_RST_DROP_RULE)
+        except _IPTABLES_ERRORS as exc:
+            raise FirewallException(f"Adding DROP rule failed: {exc}") from exc
+        if not cls._check_firewal_out_drop_rule():
+            # `__enter__` is about to raise, so `__exit__` will never run to
+            # remove the rule. If the append did land, it would keep dropping
+            # every outgoing TCP RST on this host until reboot. Try to take it
+            # back out now, and say so if that fails too.
+            try:
+                cls._iptables('-D', *_RST_DROP_RULE)
+                leftover = ""
+            except _IPTABLES_ERRORS:
+                leftover = (" — and removing it failed: check"
+                            " `iptables -L OUTPUT` for a leftover RST DROP rule")
+            raise FirewallException(
+                "Added DROP rule cannot be verified" + leftover)
+        return True
 
     @classmethod
     def _remove_firewal_out_drop_rule(cls):
         try:
-            p = subprocess.run(['iptables', '-D', 'OUTPUT', '-p', 'tcp',
-                                '--tcp-flags', 'RST', 'RST', '-j', 'DROP'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if cls._check_firewal_out_drop_rule():
-                raise FirewallException(
-                    "Removing DROP rule cannot be verified")
-            return True
-        except:
-            raise FirewallException("Removing DROP rule failed")
+            cls._iptables('-D', *_RST_DROP_RULE)
+        except _IPTABLES_ERRORS as exc:
+            raise FirewallException(
+                f"Removing DROP rule failed: {exc}. Check `iptables -L OUTPUT`"
+                " for a leftover RST DROP rule") from exc
+        if cls._check_firewal_out_drop_rule():
+            raise FirewallException(
+                "Removing DROP rule cannot be verified. Check"
+                " `iptables -L OUTPUT` for a leftover RST DROP rule")
+        return True
 
     @classmethod
     def _ask_yesno(cls, question):
@@ -171,8 +197,8 @@ class InputPacketInfo:
 
     @classmethod
     def from_stdin(cls, os_name: str, trace_retransmission: bool):
-        copy_packet_1: 'scapy.layers.inet.Packet' = None
-        copy_packet_2: 'scapy.layers.inet.Packet' = None
+        copy_packet_1: Packet | None = None
+        copy_packet_2: Packet | None = None
         do_tcph1: bool = False
         do_tcph2: bool = False
         add_firewall_rule = False
@@ -221,33 +247,29 @@ class InputPacketInfo:
 
     @classmethod
     def from_json(cls, os_name: str, trace_retransmission: bool, packet_data: json):
-        copy_packet_1: 'scapy.layers.inet.Packet' = None
-        copy_packet_2: 'scapy.layers.inet.Packet' = None
+        copy_packet_1: Packet | None = None
+        copy_packet_2: Packet | None = None
         do_tcph1: bool = False
         do_tcph2: bool = False
         add_firewall_rule = False
-        try:
-            json_config = packet_data
-            copy_packet_1 = cls._read_json_packet(
-                json_config, 'packet1', show=True)
-            if not trace_retransmission:
-                if copy_packet_1.haslayer(TCP):
-                    if copy_packet_1[TCP].flags == "PA":
-                        do_tcph1 = json_config['packet1'].get(
+        json_config = packet_data
+        copy_packet_1 = cls._read_json_packet(
+            json_config, 'packet1', show=True)
+        if not trace_retransmission:
+            if copy_packet_1.haslayer(TCP):
+                if copy_packet_1[TCP].flags == "PA":
+                    do_tcph1 = json_config['packet1'].get(
+                        'handshake', False)
+            if 'packet2' in json_config:
+                copy_packet_2 = cls._read_json_packet(
+                    json_config, 'packet2', show=True)
+                if copy_packet_2.haslayer(TCP):
+                    if copy_packet_2[TCP].flags == "PA":
+                        do_tcph2 = json_config['packet2'].get(
                             'handshake', False)
-                if 'packet2' in json_config:
-                    copy_packet_2 = cls._read_json_packet(
-                        json_config, 'packet2', show=True)
-                    if copy_packet_2.haslayer(TCP):
-                        if copy_packet_2[TCP].flags == "PA":
-                            do_tcph2 = json_config['packet2'].get(
-                                'handshake', False)
-            add_firewall_rule = json_config.get('add_firewall_drop', False)
-            print(
-                " ********************************************************************** ")
-        except FileNotFoundError:
-            print(f" · · · · · · · · file '{file}' not found!.")
-            raise BADPacketException("File Not Found")
+        add_firewall_rule = json_config.get('add_firewall_drop', False)
+        print(
+            " ********************************************************************** ")
         return InputPacketInfo(copy_packet_1, copy_packet_2, do_tcph1,  do_tcph2, add_firewall_rule)
 
     @staticmethod

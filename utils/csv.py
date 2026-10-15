@@ -43,7 +43,7 @@ def parse_json(file_name: str) -> list:
         json_str = jsonfile.read()
     try:
         json_data = json.loads(json_str)
-    except:
+    except ValueError:
         print("JSON format is not valid!")
         return ""
     for measurement in json_data:

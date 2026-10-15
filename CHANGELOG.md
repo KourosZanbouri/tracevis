@@ -20,6 +20,34 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
   writes from now on. A tracevis capture without it predates this fix. The
   field is absent from RIPE Atlas data, which needs no such marker.
 
+### Fixed (backlog §3.3/§3.4 — input errors were tracebacks; bare `except:`)
+- **`--packet-data` errors are messages.** A missing or unreadable `@file`,
+  a directory, a truncated file or bad inline JSON each printed a raw
+  traceback. Each now prints one line naming the input and the reason, and
+  exits 1, as other packet-input errors do. Bad inline JSON also suggests the
+  `@` prefix, since passing a bare path is the likeliest cause. The handler
+  meant for this in `utils/packet_input.py` was unreachable, and would itself
+  have raised `NameError`. It is removed.
+- **An unknown `--iface` is a message.** A typo escaped as scapy's
+  `ValueError` traceback, raised from inside the handler meant to catch it.
+  It now says which name was not found, lists the interfaces, and exits 1,
+  like the empty-name case already did.
+- **The RST-DROP firewall rule reports what actually happened.** Bare
+  `except:` blocks caught the module's own *"Added DROP rule cannot be
+  verified"* and replaced it with *"Adding DROP rule failed"*. Errors now
+  carry the iptables failure as their cause, and anything that is not an
+  iptables failure is no longer mistaken for one: a bug used to read as
+  "iptables is not installed".
+- **An unverified rule is no longer left behind.** If adding the rule
+  succeeded but verifying it failed, `__enter__` raised, so `__exit__` never
+  removed the rule. It would have kept dropping every outgoing TCP RST on the
+  host until reboot. It is now taken back out before raising, and if that
+  fails too, the message points at `iptables -L OUTPUT`.
+- The remaining bare `except:` blocks are narrowed to what can actually be
+  raised: `OSError` on bind in `utils/ephemeral_port.py`, `ValueError` on
+  JSON in `utils/csv.py`. The `F821` string annotations are now real types.
+  Repo-wide `ruff` findings: 79 → 61, with E722, F821 and F841 at zero.
+
 ### Fixed (backlog §3.2 — the IODA cross-check had never reached IODA)
 - `utils/ioda.py` called `ioda.caida.org/ioda-data/data/v3/{CC}/index.json`,
   which does not exist, and parsed a schema no endpoint serves. Its 30 tests

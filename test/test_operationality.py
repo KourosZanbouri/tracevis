@@ -440,3 +440,102 @@ class TestVpsRecordsIodaStatus(unittest.TestCase):
         measurement, output = self._run(mock.MagicMock(side_effect=TimeoutError("t")))
         self.assertEqual(measurement, self.MID_SHUTDOWN)
         self.assertIn("IODA unavailable, not recorded", output)
+
+
+class TestPacketDataErrorsAreMessages(unittest.TestCase):
+    """Backlog §3.3: `--packet-data` errors reached the operator as tracebacks."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def _run(self, value):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as caught:
+            tracevis.main(tracevis.get_args(
+                ["-p", "--packet-input-method", "json", "--packet-data", value,
+                 "-i", "1.1.1.1"]))
+        return caught.exception.code, buf.getvalue()
+
+    def test_a_missing_file(self):
+        code, output = self._run("@" + os.path.join(self.dir, "absent.json"))
+        self.assertEqual(code, 1)
+        self.assertIn("absent.json", output)
+        self.assertIn("No such file", output)
+
+    def test_a_directory(self):
+        code, output = self._run("@" + self.dir)
+        self.assertEqual(code, 1)
+        self.assertIn(self.dir, output)
+
+    def test_a_truncated_file(self):
+        path = os.path.join(self.dir, "t.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write('{"packet1":')
+        code, output = self._run("@" + path)
+        self.assertEqual(code, 1)
+        self.assertIn("not valid JSON", output)
+
+    def test_bad_inline_json_mentions_the_at_prefix(self):
+        code, output = self._run("packet.json")
+        self.assertEqual(code, 1)
+        self.assertIn("prefix its path with @", output)
+
+    def test_no_traceback_reaches_the_operator(self):
+        _code, output = self._run("@" + os.path.join(self.dir, "absent.json"))
+        self.assertNotIn("Traceback", output)
+
+    def test_valid_input_still_parses(self):
+        path = os.path.join(self.dir, "ok.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"packet1": "x"}, handle)
+        self.assertEqual(tracevis.load_packet_data("@" + path), {"packet1": "x"})
+        self.assertEqual(tracevis.load_packet_data('{"a": 1}'), {"a": 1})
+
+
+class TestUnknownIfaceIsAMessage(unittest.TestCase):
+    """Backlog §3.4: a mistyped `--iface` escaped as scapy's ValueError."""
+
+    @staticmethod
+    def _dev_from_name(name):
+        if name == "eth0":
+            return "eth0-object"
+        raise ValueError(f"Unknown network interface {name!r}")
+
+    def _ifaces(self):
+        """scapy's IFACES, mocked: only `eth0` exists, and no index does."""
+        from unittest import mock
+        ifaces = mock.MagicMock()
+        ifaces.dev_from_index.side_effect = ValueError("unknown index")
+        ifaces.dev_from_name.side_effect = self._dev_from_name
+        return mock.patch("scapy.all.IFACES", ifaces)
+
+    def test_unknown_name_or_index_exits_one_and_lists_interfaces(self):
+        import utils.iface
+        for value in ("nope0", "999"):
+            with self.subTest(value=value), self._ifaces() as ifaces:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), \
+                        self.assertRaises(SystemExit) as caught:
+                    utils.iface.get_iface_object(value)
+                self.assertEqual(caught.exception.code, 1)
+                self.assertIn(f"unknown network interface '{value}'", buf.getvalue())
+                self.assertIn(str(ifaces), buf.getvalue())
+
+    def test_a_known_name_is_returned(self):
+        import utils.iface
+        with self._ifaces():
+            self.assertEqual(utils.iface.get_iface_object("eth0"), "eth0-object")
+
+
+class TestEphemeralPortBindFailure(unittest.TestCase):
+    """Backlog §3.4: the bind handler was a bare `except:`; it still explains
+    and re-raises the OSError, and nothing else is caught."""
+
+    def test_an_unbindable_address_explains_and_reraises(self):
+        import utils.ephemeral_port
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(OSError):
+            # TEST-NET-3: never assigned to a local interface.
+            utils.ephemeral_port.ephemeral_port_reserve("203.0.113.9")
+        self.assertIn("203.0.113.9", buf.getvalue())

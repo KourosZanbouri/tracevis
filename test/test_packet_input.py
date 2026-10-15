@@ -7,6 +7,7 @@ not in `requirements.txt`, and is exactly what a restricted environment is
 likely to lack — was told the console was unsupported.
 """
 import io
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -14,7 +15,7 @@ from unittest import mock
 
 from scapy.all import IP, TCP
 
-from utils.packet_input import BADPacketException, InputPacketInfo
+from utils.packet_input import BADPacketException, FirewallException, InputPacketInfo
 
 IPYTHON_EMBED = "IPython.terminal.embed"
 
@@ -168,3 +169,98 @@ class TestIPythonPathIsUnchanged(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeIptables:
+    """Stand-in for `subprocess.run(['iptables', ...])`.
+
+    `fail` maps an iptables operation (`-A`, `-C`, `-D`, `-L`) to the exception
+    that operation raises; anything else succeeds. Records the operations run.
+    """
+
+    def __init__(self, **fail):
+        self.fail = {f"-{op}": exc for op, exc in fail.items()}
+        self.ops = []
+
+    def __call__(self, argv, **kwargs):
+        op = argv[1]
+        self.ops.append(op)
+        if op in self.fail:
+            raise self.fail[op]
+
+
+def refused(op):
+    return subprocess.CalledProcessError(1, ["iptables", op])
+
+
+class TestFirewallRule(unittest.TestCase):
+    """Backlog §3.4: bare `except:` around the RST-DROP rule.
+
+    The add and remove paths caught their own "cannot be verified" exception
+    and replaced it with a vaguer one, and a rule added but unverified was
+    left installed, dropping every outgoing RST on the host until reboot.
+    """
+
+    def run_with(self, fake, method):
+        with mock.patch("utils.packet_input.subprocess.run", fake):
+            return getattr(InputPacketInfo, method)()
+
+    def test_add_then_verify(self):
+        fake = FakeIptables()
+        self.assertTrue(self.run_with(fake, "_add_firewal_out_drop_rule"))
+        self.assertEqual(fake.ops, ["-A", "-C"])
+
+    def test_a_refused_add_says_so_and_keeps_the_cause(self):
+        fake = FakeIptables(A=refused("-A"))
+        with self.assertRaises(FirewallException) as caught:
+            self.run_with(fake, "_add_firewal_out_drop_rule")
+        self.assertIn("Adding DROP rule failed", str(caught.exception))
+        self.assertIsInstance(caught.exception.__cause__,
+                              subprocess.CalledProcessError)
+
+    def test_an_unverified_add_is_reported_as_unverified(self):
+        """This message was swallowed and replaced by "Adding ... failed"."""
+        fake = FakeIptables(C=refused("-C"))
+        with self.assertRaises(FirewallException) as caught:
+            self.run_with(fake, "_add_firewal_out_drop_rule")
+        self.assertEqual(str(caught.exception), "Added DROP rule cannot be verified")
+
+    def test_an_unverified_add_is_taken_back_out(self):
+        """`__exit__` never runs when `__enter__` raises."""
+        fake = FakeIptables(C=refused("-C"))
+        with self.assertRaises(FirewallException):
+            self.run_with(fake, "_add_firewal_out_drop_rule")
+        self.assertEqual(fake.ops, ["-A", "-C", "-D"])
+
+    def test_a_failed_take_back_points_at_the_leftover_rule(self):
+        fake = FakeIptables(C=refused("-C"), D=refused("-D"))
+        with self.assertRaises(FirewallException) as caught:
+            self.run_with(fake, "_add_firewal_out_drop_rule")
+        self.assertIn("iptables -L OUTPUT", str(caught.exception))
+
+    def test_a_failed_remove_points_at_the_leftover_rule(self):
+        fake = FakeIptables(D=refused("-D"))
+        with self.assertRaises(FirewallException) as caught:
+            self.run_with(fake, "_remove_firewal_out_drop_rule")
+        self.assertIn("Removing DROP rule failed", str(caught.exception))
+        self.assertIn("iptables -L OUTPUT", str(caught.exception))
+
+    def test_a_remove_that_leaves_the_rule_is_unverified(self):
+        fake = FakeIptables()          # -D succeeds and -C still finds the rule
+        with self.assertRaises(FirewallException) as caught:
+            self.run_with(fake, "_remove_firewal_out_drop_rule")
+        self.assertIn("cannot be verified", str(caught.exception))
+
+    def test_a_clean_remove(self):
+        fake = FakeIptables(C=refused("-C"))
+        self.assertTrue(self.run_with(fake, "_remove_firewal_out_drop_rule"))
+
+    def test_iptables_not_installed_is_not_present(self):
+        fake = FakeIptables(L=FileNotFoundError("iptables"))
+        self.assertFalse(self.run_with(fake, "_iptables_exists"))
+
+    def test_an_unexpected_error_is_not_swallowed(self):
+        """A bare `except:` turned a bug in this code into "iptables absent"."""
+        fake = FakeIptables(L=RuntimeError("bug"))
+        with self.assertRaises(RuntimeError):
+            self.run_with(fake, "_iptables_exists")

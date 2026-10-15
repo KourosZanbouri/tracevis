@@ -15,7 +15,7 @@ def ephemeral_port_reserve(user_source_ip_address: str, proto: str = "tcp"):
     with contextlib.closing(socket.socket(socket.AF_INET, socketkind, ipproto)) as s:
         try:
             s.bind((user_source_ip_address, 0))
-        except:
+        except OSError:
             print("An error occurred when trying to bind to:" + str(user_source_ip_address))
             print("It seems that the specified network interface is not connected to the network.")
             print("Please make sure you are connected to the network or choose a correct iface.")

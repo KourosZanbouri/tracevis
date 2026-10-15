@@ -458,13 +458,35 @@ def run_monitored_session(args, trace_kwargs, edge_lable, input_packet,
     return records
 
 
+def load_packet_data(value):
+    """Parse `--packet-data`: inline JSON, or `@path` to a JSON file.
+
+    Backlog §3.3: a missing file or bad JSON reached the operator as a raw
+    traceback. Exits 1 with a message, as the other packet-input errors do.
+    """
+    if value.startswith('@'):
+        source = f"--packet-data file '{value[1:]}'"
+        try:
+            with open(value[1:], encoding="utf-8") as handle:
+                return json.load(handle)
+        except OSError as exc:
+            reason = exc.strerror or str(exc)
+        except (ValueError, UnicodeDecodeError) as exc:
+            reason = f"not valid JSON ({exc})"
+    else:
+        source = "--packet-data"
+        try:
+            return json.loads(value)
+        except ValueError as exc:
+            reason = (f"not valid JSON ({exc}); to read a file, "
+                      "prefix its path with @")
+    print(f"{source}: {reason}")
+    sys.exit(1)
+
+
 def main(args):
     if args.get('packet_data') and isinstance(args.get('packet_data'), str):
-        if args.get('packet_data')[0] == '@':
-            with open(args.get('packet_data')[1:]) as f:
-                args['packet_data'] = json.load(f)
-        else:
-            args['packet_data'] = json.loads(args.get('packet_data'))
+        args['packet_data'] = load_packet_data(args['packet_data'])
     input_packet = None
     name_prefix = ""
     continue_to_max_ttl = False
