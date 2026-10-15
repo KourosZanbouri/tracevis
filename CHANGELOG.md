@@ -5,6 +5,11 @@ Format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-10-15
+
+Milestone 8, correctness: three defects found by the Oct 2026 audit that
+were invisible from the test suite, plus the cleanup they led to.
+
 ### Upgrade notes
 - **Captures taken before this release on a non-UTC host have shifted
   timestamps, and cannot be corrected.** `timestamp` and `endtime` were off by

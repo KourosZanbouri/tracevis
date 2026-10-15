@@ -24,7 +24,7 @@ BLACKHOLE_ADDR = utils.dpi.BLACKHOLE_ADDR
 # Single source of truth for the version. The user-agent used to carry a
 # hardcoded 0.10.5 while the repository was tagged v1.0.0 — it is the one
 # version string that leaves the machine, so it is the one that should not drift.
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 USER_AGENT = f'TraceVis/{VERSION} (WikiCensorship)'
 
 # The domain the hijack probe resolves. It has to be one that is actually

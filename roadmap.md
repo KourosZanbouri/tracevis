@@ -199,6 +199,9 @@ Acceptance: the suite passes under both UTC and `Asia/Tehran`; one recorded
 IODA response round-trips into a rendered tooltip; `ruff` E722/F821 count is 0
 outside string annotations.
 
+**Done, released as v1.3.1.** All three criteria met; see
+`docs/review/validation-report-m8.md`.
+
 ## Milestone 9 — Adapting the probes (Oct 2026: §4.1–§4.7)
 
 Goal: measure the traffic people actually send in late 2026, and keep the

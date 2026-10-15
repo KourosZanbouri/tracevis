@@ -53,10 +53,10 @@ class traceroute_data:
         self.src_addr = src_addr
         self.timestamp = timestamp
         # Backlog §3.1: "utc" means `timestamp` and `endtime` are true UTC
-        # epochs. Before v1.3.1 the tracer wrote them shifted by the host's UTC
-        # offset, and that offset was never recorded, so a tracevis capture
-        # without this key cannot be trusted to better than +/-14h in absolute
-        # time (durations are unaffected). Empty by default: only the code that
+        # epochs. Until this field was added, the tracer wrote them shifted
+        # by the host's UTC offset, and that offset was never recorded, so a
+        # tracevis capture without this key cannot be trusted to better than
+        # +/-14h in absolute time (durations are unaffected). Empty by default: only the code that
         # actually produces a correct epoch may claim one. RIPE Atlas captures
         # never carry it and never needed it; their epochs come from Atlas.
         self.clock = clock
