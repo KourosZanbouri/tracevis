@@ -1708,10 +1708,17 @@ class TestMalformedCapturesAreReportedNotRaised(unittest.TestCase):
         self.assertEqual(len(utils.vis.load_measurements(path)), 1)
 
     def test_the_reader_does_not_reject_this_repository_s_captures(self):
-        """An over-strict reader would be worse than the crash it replaces."""
-        captures = glob.glob("tracevis_data*/*.json")
-        self.assertGreater(len(captures), 0, "no captures found to check")
-        for path in captures:
+        """An over-strict reader would be worse than the crash it replaces.
+
+        Reads the committed capture fixtures, plus any local field captures.
+        It used to glob only `tracevis_data*/`, which is gitignored, so it
+        passed on the machine holding the captures and failed in every clean
+        checkout, CI included.
+        """
+        fixtures = glob.glob(os.path.join(
+            os.path.dirname(__file__), "fixtures", "captures", "*.json"))
+        self.assertGreater(len(fixtures), 0, "no committed capture fixtures")
+        for path in fixtures + glob.glob("tracevis_data*/*.json"):
             utils.vis.load_measurements(path)
 
     def test_only_the_fields_rendering_dereferences_are_required(self):

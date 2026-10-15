@@ -105,4 +105,5 @@ verdicts at *moderate* until a censoring path has confirmed them.
 | Scope creep / rewrites | Each task isolated to one module; keep each change inside one module. |
 | External API drift (IODA, RIPE Atlas, metadata providers) | §3.2 showed mocked tests can pass against an endpoint that never existed. Build fixtures from a *recorded real* response and keep one opt-in live smoke test per endpoint. |
 | Unvalidated-on-live-network features pile up | §1.4, §1.5 backoff, and soon §4.2/§4.5 are offline-tested only. Every such verdict is capped at *moderate* and says so. Batch the live validation into one field session with a checklist (M9 exit). |
+| Tests that pass only on the developer's machine | `test_the_reader_does_not_reject_this_repository_s_captures` read gitignored captures, so it passed locally and failed in every clean checkout. It shipped in v1.3.0 and surfaced only when v1.3.1 first reached CI. Verify a release from `git archive HEAD`, not from the working tree. |
 | Host-environment assumptions (timezone, IPv6, root) | §3.1 was invisible because CI runs in UTC. Run the unit job under a non-UTC `TZ` as well. |
